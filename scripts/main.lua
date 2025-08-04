@@ -33,6 +33,17 @@ local levelNameInput = ""
 local availableLevels = {}
 local selectedLevelIndex = 1
 
+-- Форматы сохранения
+local saveFormats = {"txt", "json", "tmx"}
+local selectedSaveFormat = 1
+local showSaveFormatSelector = false
+
+-- Настройки холста
+local showCanvasSettings = false
+local canvasWidthInput = tostring(settings.gridWidth)
+local canvasHeightInput = tostring(settings.gridHeight)
+local activeCanvasField = 1 -- 1 для width, 2 для height
+
 local camera = {
     x = 0, y = 0, scale = 1,
     minScale = 0.1, maxScale = 2
@@ -55,7 +66,7 @@ function love.load()
 end
 
 function love.update(dt)
-    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         updateCamera(dt)
     end
 end
@@ -129,6 +140,32 @@ function deleteCurrentLayer()
     end
 end
 
+function resizeCanvas(newWidth, newHeight)
+    gridWidth = newWidth
+    gridHeight = newHeight
+    canvas.width = gridWidth * tileSize
+    canvas.height = gridHeight * tileSize
+    
+    -- Обрезаем или расширяем существующие слои
+    for layerIndex, layer in ipairs(layers) do
+        for y = 1, newHeight do
+            if not layer[y] then
+                layer[y] = {}
+            end
+            -- Удаляем лишние тайлы, если холст стал меньше
+            for x = newWidth + 1, gridWidth do
+                layer[y][x] = nil
+            end
+        end
+        -- Удаляем лишние строки, если холст стал меньше по высоте
+        for y = newHeight + 1, #layer do
+            layer[y] = nil
+        end
+    end
+    
+    print("Canvas resized to: " .. newWidth .. "x" .. newHeight)
+end
+
 function switchAssetPack(packIndex)
     if packIndex >= 1 and packIndex <= #availableAssetPacks then
         selectedAssetPackIndex = packIndex
@@ -167,6 +204,10 @@ function love.draw()
             drawLevelNameInput()
         elseif showLevelSelector then
             drawLevelSelector()
+        elseif showSaveFormatSelector then
+            drawSaveFormatSelector()
+        elseif showCanvasSettings then
+            drawCanvasSettings()
         end
     end
 end
@@ -265,8 +306,8 @@ end
 function drawInfo()
     love.graphics.setColor(1, 1, 1)
     love.graphics.print("Current tool: " .. selectedTool .. (selectedTool == "brush" and " (Tile " .. selectedTile .. ")" or ""), 10, 10)
-    love.graphics.print("P - Save, L - Load", 10, 30)
-    love.graphics.print("ESC - Back to menu", 10, 50)
+    love.graphics.print("P - Save, L - Load, F - Format (" .. saveFormats[selectedSaveFormat]:upper() .. ")", 10, 30)
+    love.graphics.print("C - Canvas Size (" .. gridWidth .. "x" .. gridHeight .. "), ESC - Back to menu", 10, 50)
     love.graphics.print("Current Layer: " .. currentLayer .. "/" .. #layers, 10, 90)
     love.graphics.print("N - New Layer, PgUp/PgDn - Switch Layer, Del - Delete Layer", 10, 110)
     love.graphics.print("Asset Pack: " .. settings.currentAssetPack .. " (T - Toggle)", 10, 130)
@@ -274,7 +315,7 @@ function drawInfo()
 end
 
 function love.wheelmoved(x, y)
-    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         if love.mouse.getY() > love.graphics.getHeight() - paletteHeight then
             local totalRows = math.ceil(#assets / visibleTilesX)
             local maxScroll = math.max(0, totalRows - visibleTilesY)
@@ -338,6 +379,38 @@ function love.keypressed(key)
             elseif key == "escape" then
                 showLevelSelector = false
             end
+        elseif showSaveFormatSelector then
+            if key == "up" then
+                selectedSaveFormat = math.max(1, selectedSaveFormat - 1)
+            elseif key == "down" then
+                selectedSaveFormat = math.min(#saveFormats, selectedSaveFormat + 1)
+            elseif key == "return" then
+                showSaveFormatSelector = false
+            elseif key == "escape" then
+                showSaveFormatSelector = false
+            end
+        elseif showCanvasSettings then
+            if key == "return" then
+                local newWidth = tonumber(canvasWidthInput)
+                local newHeight = tonumber(canvasHeightInput)
+                if newWidth and newHeight and newWidth > 0 and newHeight > 0 then
+                    resizeCanvas(newWidth, newHeight)
+                    showCanvasSettings = false
+                end
+            elseif key == "escape" then
+                showCanvasSettings = false
+                canvasWidthInput = tostring(gridWidth)
+                canvasHeightInput = tostring(gridHeight)
+                activeCanvasField = 1
+            elseif key == "backspace" then
+                if activeCanvasField == 1 then
+                    canvasWidthInput = canvasWidthInput:sub(1, -2)
+                else
+                    canvasHeightInput = canvasHeightInput:sub(1, -2)
+                end
+            elseif key == "tab" or key == "up" or key == "down" then
+                activeCanvasField = activeCanvasField == 1 and 2 or 1
+            end
         else
             if key == "p" then saveLevel()
             elseif key == "l" then loadLevel()
@@ -352,13 +425,15 @@ function love.keypressed(key)
             elseif key == "pageup" then switchLayer(currentLayer + 1)
             elseif key == "pagedown" then switchLayer(currentLayer - 1)
             elseif key == "delete" then deleteCurrentLayer()
+            elseif key == "f" then showSaveFormatSelector = true
+            elseif key == "c" then showCanvasSettings = true
             end
         end
     end
 end
 
 function love.mousepressed(x, y, button)
-    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         if y > love.graphics.getHeight() - paletteHeight and x < love.graphics.getWidth() - 100 then
             local tileX = math.floor((x - 5) / tileButtonSize)
             local tileY = math.floor((y - (love.graphics.getHeight() - paletteHeight) - 5) / tileButtonSize)
@@ -392,11 +467,27 @@ function love.mousepressed(x, y, button)
                 end
             end
         end
+    elseif showCanvasSettings then
+        -- Обработка кликов мыши в диалоге настроек холста
+        local centerX = love.graphics.getWidth() / 2
+        local centerY = love.graphics.getHeight() / 2
+        local boxWidth = 400
+        local boxHeight = 250
+        local boxX = centerX - boxWidth / 2
+        local boxY = centerY - boxHeight / 2
+        
+        -- Проверяем клик по полю width
+        if x >= boxX + 120 and x <= boxX + 220 and y >= boxY + 75 and y <= boxY + 100 then
+            activeCanvasField = 1
+        -- Проверяем клик по полю height
+        elseif x >= boxX + 120 and x <= boxX + 220 and y >= boxY + 105 and y <= boxY + 130 then
+            activeCanvasField = 2
+        end
     end
 end
 
 function love.mousemoved(x, y, dx, dy, istouch)
-    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         local worldX = x / camera.scale + camera.x
         local worldY = y / camera.scale + camera.y
         local tileX = math.floor(worldX / tileSize) + 1
@@ -419,7 +510,7 @@ function love.mousemoved(x, y, dx, dy, istouch)
 end
 
 function love.mousereleased(x, y, button)
-    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         local tileX = math.floor((x / camera.scale + camera.x) / tileSize) + 1
         local tileY = math.floor((y / camera.scale + camera.y) / tileSize) + 1
 
@@ -445,17 +536,18 @@ function love.textinput(text)
         if text:match("[%w%s_%-]") then
             levelNameInput = levelNameInput .. text
         end
+    elseif showCanvasSettings then
+        if text:match("[%d]") then
+            if activeCanvasField == 1 then
+                canvasWidthInput = canvasWidthInput .. text
+            else
+                canvasHeightInput = canvasHeightInput .. text
+            end
+        end
     end
 end
 
-function saveLevel(levelName)
-    if not levelName or levelName == "" then
-        showLevelNameInput = true
-        levelNameInput = ""
-        return
-    end
-    
-    
+function generateTxtData()
     local data = gridWidth .. "," .. gridHeight .. "," .. #layers .. "\n"
     for layerIndex, layer in ipairs(layers) do
         for y = 1, gridHeight do
@@ -470,16 +562,145 @@ function saveLevel(levelName)
         end
         data = data .. "---\n"
     end
+    return data
+end
+
+function generateJsonData()
+    local json = {
+        width = gridWidth,
+        height = gridHeight,
+        tileSize = tileSize,
+        layers = {}
+    }
+    
+    for layerIndex, layer in ipairs(layers) do
+        local layerData = {}
+        for y = 1, gridHeight do
+            layerData[y] = {}
+            for x = 1, gridWidth do
+                layerData[y][x] = layer[y] and layer[y][x] or 0
+            end
+        end
+        table.insert(json.layers, {
+            name = "Layer " .. layerIndex,
+            data = layerData
+        })
+    end
+    
+    -- Простая JSON сериализация
+    local function serializeTable(t)
+        if type(t) ~= "table" then
+            if type(t) == "string" then
+                return '"' .. t .. '"'
+            else
+                return tostring(t)
+            end
+        end
+        
+        local result = "{"
+        local first = true
+        for k, v in pairs(t) do
+            if not first then result = result .. "," end
+            first = false
+            result = result .. '"' .. k .. '":'
+            if type(v) == "table" then
+                if k == "data" then
+                    result = result .. "["
+                    for i = 1, #v do
+                        if i > 1 then result = result .. "," end
+                        result = result .. "["
+                        for j = 1, #v[i] do
+                            if j > 1 then result = result .. "," end
+                            result = result .. v[i][j]
+                        end
+                        result = result .. "]"
+                    end
+                    result = result .. "]"
+                elseif k == "layers" then
+                    result = result .. "["
+                    for i = 1, #v do
+                        if i > 1 then result = result .. "," end
+                        result = result .. serializeTable(v[i])
+                    end
+                    result = result .. "]"
+                else
+                    result = result .. serializeTable(v)
+                end
+            else
+                result = result .. serializeTable(v)
+            end
+        end
+        result = result .. "}"
+        return result
+    end
+    
+    return serializeTable(json)
+end
+
+function generateTmxData()
+    local tmx = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    tmx = tmx .. '<map version="1.10" tiledversion="1.10.1" orientation="orthogonal" renderorder="right-down" compressionlevel="0" width="' .. gridWidth .. '" height="' .. gridHeight .. '" tilewidth="' .. tileSize .. '" tileheight="' .. tileSize .. '" infinite="0" nextlayerid="' .. (#layers + 1) .. '" nextobjectid="1">\n'
+    
+    -- Tileset information
+    tmx = tmx .. ' <tileset firstgid="1" name="tiles" tilewidth="' .. tileSize .. '" tileheight="' .. tileSize .. '" tilecount="64" columns="8">\n'
+    tmx = tmx .. '  <image source="../assets/' .. settings.currentAssetPack .. '/1.png" width="' .. (tileSize * 8) .. '" height="' .. (tileSize * 8) .. '"/>\n'
+    tmx = tmx .. ' </tileset>\n'
+    
+    -- Layer data
+    for layerIndex, layer in ipairs(layers) do
+        tmx = tmx .. ' <layer id="' .. layerIndex .. '" name="Layer ' .. layerIndex .. '" width="' .. gridWidth .. '" height="' .. gridHeight .. '">\n'
+        tmx = tmx .. '  <data encoding="csv">\n'
+        
+        for y = 1, gridHeight do
+            for x = 1, gridWidth do
+                local tileValue = layer[y] and layer[y][x] or 0
+                tmx = tmx .. tileValue
+                if x < gridWidth or y < gridHeight then
+                    tmx = tmx .. ","
+                end
+            end
+            if y < gridHeight then
+                tmx = tmx .. "\n"
+            end
+        end
+        
+        tmx = tmx .. '\n  </data>\n'
+        tmx = tmx .. ' </layer>\n'
+    end
+    
+    tmx = tmx .. '</map>\n'
+    return tmx
+end
+
+function saveLevel(levelName)
+    if not levelName or levelName == "" then
+        showLevelNameInput = true
+        levelNameInput = ""
+        return
+    end
     
     -- Создаем папку levels используя стандартный Lua IO
     os.execute("mkdir -p levels")
     
-    local filename = "levels/" .. levelName .. ".txt"
+    local format = saveFormats[selectedSaveFormat]
+    local data, filename
+    
+    if format == "txt" then
+        data = generateTxtData()
+        filename = "levels/" .. levelName .. ".txt"
+    elseif format == "json" then
+        data = generateJsonData()
+        filename = "levels/" .. levelName .. ".json"
+    elseif format == "tmx" then
+        data = generateTmxData()
+        filename = "levels/" .. levelName .. ".tmx"
+    end
+    
     local file = io.open(filename, "w")
     if file then
         file:write(data)
         file:close()
-        print("Level saved as: " .. levelName .. " in project directory")
+        print("Level saved as: " .. levelName .. "." .. format .. " in project directory")
     else
         print("Failed to save level: " .. levelName)
     end
@@ -819,6 +1040,94 @@ function drawLevelSelector()
     love.graphics.setColor(0.8, 0.8, 0.8)
     love.graphics.printf("Use UP/DOWN arrows to select, ENTER to load, ESC to cancel", 
                         boxX, boxY + boxHeight - 30, boxWidth, "center")
+end
+
+function drawSaveFormatSelector()
+    local centerX = love.graphics.getWidth() / 2
+    local centerY = love.graphics.getHeight() / 2
+    local boxWidth = 300
+    local boxHeight = 200
+    local boxX = centerX - boxWidth / 2
+    local boxY = centerY - boxHeight / 2
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 0.9)
+    love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf("Select Save Format", boxX, boxY + 10, boxWidth, "center")
+    
+    for i, format in ipairs(saveFormats) do
+        local y = boxY + 50 + (i - 1) * 25
+        if i == selectedSaveFormat then
+            love.graphics.setColor(1, 1, 0)
+            love.graphics.printf("> " .. format:upper() .. " <", boxX, y, boxWidth, "center")
+        else
+            love.graphics.setColor(0.8, 0.8, 0.8)
+            love.graphics.printf(format:upper(), boxX, y, boxWidth, "center")
+        end
+    end
+    
+    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.printf("UP/DOWN to select, ENTER to confirm, ESC to cancel", 
+                        boxX, boxY + boxHeight - 30, boxWidth, "center")
+end
+
+function drawCanvasSettings()
+    local centerX = love.graphics.getWidth() / 2
+    local centerY = love.graphics.getHeight() / 2
+    local boxWidth = 400
+    local boxHeight = 250
+    local boxX = centerX - boxWidth / 2
+    local boxY = centerY - boxHeight / 2
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 0.9)
+    love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf("Canvas Settings", boxX, boxY + 10, boxWidth, "center")
+    
+    love.graphics.printf("Current: " .. gridWidth .. "x" .. gridHeight, boxX, boxY + 40, boxWidth, "center")
+    
+    love.graphics.setColor(0.8, 0.8, 0.8)
+    love.graphics.printf("Width:", boxX + 20, boxY + 80, 100, "left")
+    love.graphics.printf("Height:", boxX + 20, boxY + 110, 100, "left")
+    
+    -- Input fields
+    -- Width field
+    if activeCanvasField == 1 then
+        love.graphics.setColor(0.4, 0.4, 0.6) -- Активное поле
+    else
+        love.graphics.setColor(0.3, 0.3, 0.3) -- Неактивное поле
+    end
+    love.graphics.rectangle("fill", boxX + 120, boxY + 75, 100, 25)
+    
+    -- Height field
+    if activeCanvasField == 2 then
+        love.graphics.setColor(0.4, 0.4, 0.6) -- Активное поле
+    else
+        love.graphics.setColor(0.3, 0.3, 0.3) -- Неактивное поле
+    end
+    love.graphics.rectangle("fill", boxX + 120, boxY + 105, 100, 25)
+    
+    -- Границы полей
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX + 120, boxY + 75, 100, 25)
+    love.graphics.rectangle("line", boxX + 120, boxY + 105, 100, 25)
+    
+    -- Текст в полях
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf(canvasWidthInput .. (activeCanvasField == 1 and "|" or ""), boxX + 125, boxY + 80, 90, "left")
+    love.graphics.printf(canvasHeightInput .. (activeCanvasField == 2 and "|" or ""), boxX + 125, boxY + 110, 90, "left")
+    
+    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.printf("UP/DOWN or TAB to switch fields", boxX, boxY + 150, boxWidth, "center")
+    love.graphics.printf("ENTER to apply, ESC to cancel", boxX, boxY + 180, boxWidth, "center")
 end
 
 function drawLine(x1, y1, x2, y2)
