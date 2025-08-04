@@ -455,9 +455,6 @@ function saveLevel(levelName)
         return
     end
     
-    if not love.filesystem.getInfo(settings.levelsPath) then
-        love.filesystem.createDirectory(settings.levelsPath)
-    end
     
     local data = gridWidth .. "," .. gridHeight .. "," .. #layers .. "\n"
     for layerIndex, layer in ipairs(layers) do
@@ -474,10 +471,15 @@ function saveLevel(levelName)
         data = data .. "---\n"
     end
     
-    local filename = settings.levelsPath .. levelName .. ".txt"
-    local success = love.filesystem.write(filename, data)
-    if success then
-        print("Level saved as: " .. levelName)
+    -- Создаем папку levels используя стандартный Lua IO
+    os.execute("mkdir -p levels")
+    
+    local filename = "levels/" .. levelName .. ".txt"
+    local file = io.open(filename, "w")
+    if file then
+        file:write(data)
+        file:close()
+        print("Level saved as: " .. levelName .. " in project directory")
     else
         print("Failed to save level: " .. levelName)
     end
@@ -490,8 +492,13 @@ function loadLevel(levelName)
         return
     end
     
-    local filename = settings.levelsPath .. levelName .. ".txt"
-    local data = love.filesystem.read(filename)
+    local filename = "levels/" .. levelName .. ".txt"
+    local file = io.open(filename, "r")
+    local data = nil
+    if file then
+        data = file:read("*all")
+        file:close()
+    end
     
     if data then
         local lines = {}
@@ -542,13 +549,17 @@ end
 
 function updateAvailableLevels()
     availableLevels = {}
-    local files = love.filesystem.getDirectoryItems(settings.levelsPath)
     
-    for _, filename in ipairs(files) do
-        if filename:match("%.txt$") then
-            local levelName = filename:gsub("%.txt$", "")
-            table.insert(availableLevels, levelName)
+    -- Используем стандартные возможности для чтения папки
+    local handle = io.popen('ls levels/*.txt 2>/dev/null')
+    if handle then
+        for filename in handle:lines() do
+            local levelName = filename:match("levels/(.*)%.txt$")
+            if levelName then
+                table.insert(availableLevels, levelName)
+            end
         end
+        handle:close()
     end
     
     table.sort(availableLevels)
