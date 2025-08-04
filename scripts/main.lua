@@ -5,7 +5,6 @@ local tileSize = settings.tileSize
 local gridWidth = settings.gridWidth
 local gridHeight = settings.gridHeight
 local canvas = {width = gridWidth * tileSize, height = gridHeight * tileSize}
-local grid = {}
 local selectedTile = 1
 local showMenu = true
 local isErasing = false
@@ -22,6 +21,17 @@ local paletteHeight = 120
 local tools = {"brush", "eraser", "bucket", "line", "rectangle"}
 local selectedTool = "brush"
 local startX, startY = nil, nil
+local previewX, previewY = nil, nil
+
+local availableAssetPacks = {}
+local selectedAssetPackIndex = 1
+local showAssetPackSelector = false
+
+local showLevelNameInput = false
+local showLevelSelector = false
+local levelNameInput = ""
+local availableLevels = {}
+local selectedLevelIndex = 1
 
 local camera = {
     x = 0, y = 0, scale = 1,
@@ -30,13 +40,22 @@ local camera = {
 
 function love.load()
     love.window.setMode(1024, 768, {resizable=false, vsync=true})
-    love.window.setTitle(settings.NAME .. " - " .. settings.VERSION)
+    love.window.setTitle(settings.getWindowTitle())
+    availableAssetPacks = settings.getAvailableAssetPacks()
+    
+    for i, pack in ipairs(availableAssetPacks) do
+        if pack == settings.currentAssetPack then
+            selectedAssetPackIndex = i
+            break
+        end
+    end
+    
     loadAssets()
     createNewLayer()  -- Создаем первый слой при запуске
 end
 
 function love.update(dt)
-    if not showMenu then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
         updateCamera(dt)
     end
 end
@@ -50,11 +69,35 @@ function updateCamera(dt)
 end
 
 function loadAssets()
-    for _, filename in ipairs(settings.assets) do
-        local path = "assets/" .. filename
-        local image = love.graphics.newImage(path)
-        table.insert(assets, image)
+    assets = {}
+    local packPath = settings.getAssetPackPath()
+    local files = love.filesystem.getDirectoryItems(packPath)
+    local imageFiles = {}
+    
+    for _, filename in ipairs(files) do
+        if filename:match("%.png$") then
+            table.insert(imageFiles, filename)
+        end
     end
+    
+    table.sort(imageFiles, function(a, b)
+        local numA = tonumber(a:match("(%d+)%.png$")) or 0
+        local numB = tonumber(b:match("(%d+)%.png$")) or 0
+        return numA < numB
+    end)
+    
+    for _, filename in ipairs(imageFiles) do
+        local path = packPath .. filename
+        local success, image = pcall(love.graphics.newImage, path)
+        if success then
+            table.insert(assets, image)
+            print("Loaded asset: " .. filename .. " from pack: " .. settings.currentAssetPack)
+        else
+            print("Failed to load asset: " .. filename)
+        end
+    end
+    
+    print("Total assets loaded: " .. #assets .. " from pack: " .. settings.currentAssetPack)
 end
 
 function createNewLayer()
@@ -86,6 +129,16 @@ function deleteCurrentLayer()
     end
 end
 
+function switchAssetPack(packIndex)
+    if packIndex >= 1 and packIndex <= #availableAssetPacks then
+        selectedAssetPackIndex = packIndex
+        settings.currentAssetPack = availableAssetPacks[packIndex]
+        print("Switched to asset pack: " .. settings.currentAssetPack)
+        loadAssets()
+        selectedTile = math.min(selectedTile, #assets)
+    end
+end
+
 function isInsidePaletteArea(x, y)
     local paletteHeight = 100
     local paletteWidth = love.graphics.getWidth() - 100
@@ -101,17 +154,27 @@ function love.draw()
         love.graphics.translate(-camera.x, -camera.y)
         drawGrid()
         drawHoveredTile()
+        drawPreview()
         love.graphics.pop()
         drawPalette()
         drawTools()
         drawInfo()
         drawCoordinates()
+        
+        if showAssetPackSelector then
+            drawAssetPackSelector()
+        elseif showLevelNameInput then
+            drawLevelNameInput()
+        elseif showLevelSelector then
+            drawLevelSelector()
+        end
     end
 end
 
 function drawMenu()
-    love.graphics.printf("LevelMaker", 0, 300, love.graphics.getWidth(), "center")
+    love.graphics.printf(settings.getFullTitle(), 0, 300, love.graphics.getWidth(), "center")
     love.graphics.printf("Press Enter to start", 0, 350, love.graphics.getWidth(), "center")
+    love.graphics.printf("by " .. settings.AUTHOR, 0, 380, love.graphics.getWidth(), "center")
 end
 
 function drawGrid()
@@ -206,10 +269,12 @@ function drawInfo()
     love.graphics.print("ESC - Back to menu", 10, 50)
     love.graphics.print("Current Layer: " .. currentLayer .. "/" .. #layers, 10, 90)
     love.graphics.print("N - New Layer, PgUp/PgDn - Switch Layer, Del - Delete Layer", 10, 110)
+    love.graphics.print("Asset Pack: " .. settings.currentAssetPack .. " (T - Toggle)", 10, 130)
+    love.graphics.print("Assets: " .. #assets, 10, 150)
 end
 
 function love.wheelmoved(x, y)
-    if not showMenu then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
         if love.mouse.getY() > love.graphics.getHeight() - paletteHeight then
             local totalRows = math.ceil(#assets / visibleTilesX)
             local maxScroll = math.max(0, totalRows - visibleTilesY)
@@ -236,24 +301,64 @@ function love.keypressed(key)
         layers = {}
         createNewLayer()
     elseif not showMenu then
-        if key == "p" then saveLevel()
-        elseif key == "l" then loadLevel()
-        elseif key == "escape" then showMenu = true
-        elseif key == "1" then selectedTool = "brush"
-        elseif key == "2" then selectedTool = "eraser"
-        elseif key == "3" then selectedTool = "bucket"
-        elseif key == "4" then selectedTool = "line"
-        elseif key == "5" then selectedTool = "rectangle"
-        elseif key == "n" then createNewLayer()
-        elseif key == "pageup" then switchLayer(currentLayer + 1)
-        elseif key == "pagedown" then switchLayer(currentLayer - 1)
-        elseif key == "delete" then deleteCurrentLayer()
+        if showAssetPackSelector then
+            if key == "up" then
+                selectedAssetPackIndex = math.max(1, selectedAssetPackIndex - 1)
+            elseif key == "down" then
+                selectedAssetPackIndex = math.min(#availableAssetPacks, selectedAssetPackIndex + 1)
+            elseif key == "return" then
+                switchAssetPack(selectedAssetPackIndex)
+                showAssetPackSelector = false
+            elseif key == "escape" then
+                showAssetPackSelector = false
+            end
+        elseif showLevelNameInput then
+            if key == "return" then
+                if levelNameInput ~= "" then
+                    saveLevel(levelNameInput)
+                    showLevelNameInput = false
+                    levelNameInput = ""
+                end
+            elseif key == "escape" then
+                showLevelNameInput = false
+                levelNameInput = ""
+            elseif key == "backspace" then
+                levelNameInput = levelNameInput:sub(1, -2)
+            end
+        elseif showLevelSelector then
+            if key == "up" then
+                selectedLevelIndex = math.max(1, selectedLevelIndex - 1)
+            elseif key == "down" then
+                selectedLevelIndex = math.min(#availableLevels, selectedLevelIndex + 1)
+            elseif key == "return" then
+                if #availableLevels > 0 then
+                    loadLevel(availableLevels[selectedLevelIndex])
+                    showLevelSelector = false
+                end
+            elseif key == "escape" then
+                showLevelSelector = false
+            end
+        else
+            if key == "p" then saveLevel()
+            elseif key == "l" then loadLevel()
+            elseif key == "escape" then showMenu = true
+            elseif key == "t" then showAssetPackSelector = true
+            elseif key == "1" then selectedTool = "brush"
+            elseif key == "2" then selectedTool = "eraser"
+            elseif key == "3" then selectedTool = "bucket"
+            elseif key == "4" then selectedTool = "line"
+            elseif key == "5" then selectedTool = "rectangle"
+            elseif key == "n" then createNewLayer()
+            elseif key == "pageup" then switchLayer(currentLayer + 1)
+            elseif key == "pagedown" then switchLayer(currentLayer - 1)
+            elseif key == "delete" then deleteCurrentLayer()
+            end
         end
     end
 end
 
 function love.mousepressed(x, y, button)
-    if not showMenu then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
         if y > love.graphics.getHeight() - paletteHeight and x < love.graphics.getWidth() - 100 then
             local tileX = math.floor((x - 5) / tileButtonSize)
             local tileY = math.floor((y - (love.graphics.getHeight() - paletteHeight) - 5) / tileButtonSize)
@@ -291,24 +396,30 @@ function love.mousepressed(x, y, button)
 end
 
 function love.mousemoved(x, y, dx, dy, istouch)
-    if not showMenu and love.mouse.isDown(1) then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
         local worldX = x / camera.scale + camera.x
         local worldY = y / camera.scale + camera.y
         local tileX = math.floor(worldX / tileSize) + 1
         local tileY = math.floor(worldY / tileSize) + 1
-
+        
         if tileX >= 1 and tileX <= gridWidth and tileY >= 1 and tileY <= gridHeight then
-            if selectedTool == "brush" then
-                applyBrush(tileX, tileY)
-            elseif selectedTool == "eraser" then
-                applyEraser(tileX, tileY)
+            previewX, previewY = tileX, tileY
+            
+            if love.mouse.isDown(1) then
+                if selectedTool == "brush" then
+                    applyBrush(tileX, tileY)
+                elseif selectedTool == "eraser" then
+                    applyEraser(tileX, tileY)
+                end
             end
+        else
+            previewX, previewY = nil, nil
         end
     end
 end
 
 function love.mousereleased(x, y, button)
-    if not showMenu then
+    if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector then
         local tileX = math.floor((x / camera.scale + camera.x) / tileSize) + 1
         local tileY = math.floor((y / camera.scale + camera.y) / tileSize) + 1
 
@@ -322,10 +433,32 @@ function love.mousereleased(x, y, button)
             drawRectangle(startX, startY, tileX, tileY)
             startX, startY = nil, nil
         end
+        
+        if selectedTool ~= "line" and selectedTool ~= "rectangle" then
+            startX, startY = nil, nil
+        end
     end
 end
 
-function saveLevel()
+function love.textinput(text)
+    if showLevelNameInput then
+        if text:match("[%w%s_%-]") then
+            levelNameInput = levelNameInput .. text
+        end
+    end
+end
+
+function saveLevel(levelName)
+    if not levelName or levelName == "" then
+        showLevelNameInput = true
+        levelNameInput = ""
+        return
+    end
+    
+    if not love.filesystem.getInfo(settings.levelsPath) then
+        love.filesystem.createDirectory(settings.levelsPath)
+    end
+    
     local data = gridWidth .. "," .. gridHeight .. "," .. #layers .. "\n"
     for layerIndex, layer in ipairs(layers) do
         for y = 1, gridHeight do
@@ -338,26 +471,29 @@ function saveLevel()
             end
             data = data .. "\n"
         end
-        data = data .. "---\n"  -- Разделитель между слоями
+        data = data .. "---\n"
     end
     
-    local file = io.open("level.txt", "w")
-    if file then
-        file:write(data)
-        file:close()
-        print("Уровень успешно сохранен")
+    local filename = settings.levelsPath .. levelName .. ".txt"
+    local success = love.filesystem.write(filename, data)
+    if success then
+        print("Level saved as: " .. levelName)
     else
-        print("Не удалось сохранить уровень")
+        print("Failed to save level: " .. levelName)
     end
 end
 
--- Обновите функцию loadLevel()
-function loadLevel()
-    local file = io.open("level.txt", "r")
-    if file then
-        local data = file:read("*all")
-        file:close()
-        
+function loadLevel(levelName)
+    if not levelName then
+        showLevelSelector = true
+        updateAvailableLevels()
+        return
+    end
+    
+    local filename = settings.levelsPath .. levelName .. ".txt"
+    local data = love.filesystem.read(filename)
+    
+    if data then
         local lines = {}
         for line in data:gmatch("[^\n]+") do
             table.insert(lines, line)
@@ -398,10 +534,25 @@ function loadLevel()
         end
         
         currentLayer = 1
-        print("Уровень успешно загружен")
+        print("Level loaded: " .. levelName)
     else
-        print("Не удалось загрузить уровень")
+        print("Failed to load level: " .. levelName)
     end
+end
+
+function updateAvailableLevels()
+    availableLevels = {}
+    local files = love.filesystem.getDirectoryItems(settings.levelsPath)
+    
+    for _, filename in ipairs(files) do
+        if filename:match("%.txt$") then
+            local levelName = filename:gsub("%.txt$", "")
+            table.insert(availableLevels, levelName)
+        end
+    end
+    
+    table.sort(availableLevels)
+    selectedLevelIndex = 1
 end
 
 function applyBrush(x, y)
@@ -421,7 +572,8 @@ end
 
 function applyBucket(x, y)
     if x >= 1 and x <= gridWidth and y >= 1 and y <= gridHeight then
-        local targetTile = grid[y] and grid[y][x]
+        local currentLayerData = layers[currentLayer]
+        local targetTile = currentLayerData[y] and currentLayerData[y][x] or nil
         if targetTile ~= selectedTile then
             floodFill(x, y, targetTile, selectedTile)
         end
@@ -430,8 +582,20 @@ end
 
 function floodFill(x, y, targetTile, replacementTile)
     if x < 1 or x > gridWidth or y < 1 or y > gridHeight then return end
-    if grid[y] and grid[y][x] == targetTile then
-        grid[y][x] = replacementTile
+    
+    local currentLayerData = layers[currentLayer]
+    local currentTile = currentLayerData[y] and currentLayerData[y][x] or nil
+    
+    if currentTile == targetTile then
+        if replacementTile then
+            currentLayerData[y] = currentLayerData[y] or {}
+            currentLayerData[y][x] = replacementTile
+        else
+            if currentLayerData[y] then
+                currentLayerData[y][x] = nil
+            end
+        end
+        
         floodFill(x + 1, y, targetTile, replacementTile)
         floodFill(x - 1, y, targetTile, replacementTile)
         floodFill(x, y + 1, targetTile, replacementTile)
@@ -456,6 +620,78 @@ function drawHoveredTile()
     end
 end
 
+function drawPreview()
+    if startX and startY and previewX and previewY then
+        love.graphics.setColor(0, 1, 0, 0.5)
+        
+        if selectedTool == "line" then
+            local positions = getLinePositions(startX, startY, previewX, previewY)
+            for _, pos in ipairs(positions) do
+                love.graphics.rectangle("fill", 
+                    (pos.x - 1) * tileSize,
+                    (pos.y - 1) * tileSize,
+                    tileSize, tileSize)
+            end
+        elseif selectedTool == "rectangle" then
+            local left = math.min(startX, previewX)
+            local right = math.max(startX, previewX)
+            local top = math.min(startY, previewY)
+            local bottom = math.max(startY, previewY)
+            
+            for x = left, right do
+                love.graphics.rectangle("fill", 
+                    (x - 1) * tileSize,
+                    (top - 1) * tileSize,
+                    tileSize, tileSize)
+                love.graphics.rectangle("fill", 
+                    (x - 1) * tileSize,
+                    (bottom - 1) * tileSize,
+                    tileSize, tileSize)
+            end
+            for y = top, bottom do
+                love.graphics.rectangle("fill", 
+                    (left - 1) * tileSize,
+                    (y - 1) * tileSize,
+                    tileSize, tileSize)
+                love.graphics.rectangle("fill", 
+                    (right - 1) * tileSize,
+                    (y - 1) * tileSize,
+                    tileSize, tileSize)
+            end
+        end
+    end
+end
+
+function getLinePositions(x1, y1, x2, y2)
+    local positions = {}
+    x1 = math.max(1, math.min(x1, gridWidth))
+    y1 = math.max(1, math.min(y1, gridHeight))
+    x2 = math.max(1, math.min(x2, gridWidth))
+    y2 = math.max(1, math.min(y2, gridHeight))
+
+    local dx = math.abs(x2 - x1)
+    local dy = math.abs(y2 - y1)
+    local sx = x1 < x2 and 1 or -1
+    local sy = y1 < y2 and 1 or -1
+    local err = dx - dy
+
+    while true do
+        table.insert(positions, {x = x1, y = y1})
+        if x1 == x2 and y1 == y2 then break end
+        local e2 = 2 * err
+        if e2 > -dy then
+            err = err - dy
+            x1 = x1 + sx
+        end
+        if e2 < dx then
+            err = err + dx
+            y1 = y1 + sy
+        end
+    end
+    
+    return positions
+end
+
 function drawCoordinates()
     local mouseX, mouseY = love.mouse.getPosition()
     local worldMouseX = mouseX / camera.scale + camera.x
@@ -471,6 +707,107 @@ function drawCoordinates()
         love.graphics.setColor(1, 1, 1)
         love.graphics.print("X: -, Y: -", 10, 70)
     end
+end
+
+function drawAssetPackSelector()
+    local centerX = love.graphics.getWidth() / 2
+    local centerY = love.graphics.getHeight() / 2
+    local boxWidth = 400
+    local boxHeight = math.min(300, #availableAssetPacks * 25 + 80)
+    local boxX = centerX - boxWidth / 2
+    local boxY = centerY - boxHeight / 2
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 0.9)
+    love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf("Select Asset Pack", boxX, boxY + 10, boxWidth, "center")
+    
+    for i, pack in ipairs(availableAssetPacks) do
+        local y = boxY + 40 + (i - 1) * 25
+        if i == selectedAssetPackIndex then
+            love.graphics.setColor(1, 1, 0)
+            love.graphics.rectangle("fill", boxX + 10, y - 2, boxWidth - 20, 20)
+            love.graphics.setColor(0, 0, 0)
+        else
+            love.graphics.setColor(1, 1, 1)
+        end
+        love.graphics.print(pack, boxX + 15, y)
+    end
+    
+    love.graphics.setColor(0.8, 0.8, 0.8)
+    love.graphics.printf("Use UP/DOWN arrows to select, ENTER to confirm, ESC to cancel", 
+                        boxX, boxY + boxHeight - 30, boxWidth, "center")
+end
+
+function drawLevelNameInput()
+    local centerX = love.graphics.getWidth() / 2
+    local centerY = love.graphics.getHeight() / 2
+    local boxWidth = 400
+    local boxHeight = 120
+    local boxX = centerX - boxWidth / 2
+    local boxY = centerY - boxHeight / 2
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 0.9)
+    love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf("Enter Level Name", boxX, boxY + 10, boxWidth, "center")
+    
+    love.graphics.setColor(0.8, 0.8, 0.8)
+    love.graphics.rectangle("fill", boxX + 20, boxY + 40, boxWidth - 40, 25)
+    
+    love.graphics.setColor(0, 0, 0)
+    love.graphics.print(levelNameInput .. "|", boxX + 25, boxY + 45)
+    
+    love.graphics.setColor(0.8, 0.8, 0.8)
+    love.graphics.printf("Type name and press ENTER to save, ESC to cancel", 
+                        boxX, boxY + 80, boxWidth, "center")
+end
+
+function drawLevelSelector()
+    local centerX = love.graphics.getWidth() / 2
+    local centerY = love.graphics.getHeight() / 2
+    local boxWidth = 400
+    local boxHeight = math.min(300, #availableLevels * 25 + 80)
+    local boxX = centerX - boxWidth / 2
+    local boxY = centerY - boxHeight / 2
+    
+    love.graphics.setColor(0.2, 0.2, 0.2, 0.9)
+    love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight)
+    
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.printf("Select Level to Load", boxX, boxY + 10, boxWidth, "center")
+    
+    if #availableLevels == 0 then
+        love.graphics.setColor(0.8, 0.8, 0.8)
+        love.graphics.printf("No saved levels found", boxX, boxY + 50, boxWidth, "center")
+    else
+        for i, levelName in ipairs(availableLevels) do
+            local y = boxY + 40 + (i - 1) * 25
+            if i == selectedLevelIndex then
+                love.graphics.setColor(1, 1, 0)
+                love.graphics.rectangle("fill", boxX + 10, y - 2, boxWidth - 20, 20)
+                love.graphics.setColor(0, 0, 0)
+            else
+                love.graphics.setColor(1, 1, 1)
+            end
+            love.graphics.print(levelName, boxX + 15, y)
+        end
+    end
+    
+    love.graphics.setColor(0.8, 0.8, 0.8)
+    love.graphics.printf("Use UP/DOWN arrows to select, ENTER to load, ESC to cancel", 
+                        boxX, boxY + boxHeight - 30, boxWidth, "center")
 end
 
 function drawLine(x1, y1, x2, y2)

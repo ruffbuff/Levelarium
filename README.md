@@ -1,5 +1,5 @@
-# LuaLevelMaker
-LevelMaker is a versatile and user-friendly level editor built with LÖVE2D. It allows you to create, edit, and save custom game levels using a tile-based system.
+# Levelarium
+Levelarium is a versatile and user-friendly level editor built with LÖVE2D. It allows you to create, edit, and save custom game levels using a tile-based system.
 
 ## Features
 - Intuitive tile-based level editing
@@ -15,14 +15,14 @@ LevelMaker is a versatile and user-friendly level editor built with LÖVE2D. It 
 
 ### Installation
 ```bash
-git clone https://github.com/ruffbuff/LuaLevelMaker
-cd LuaLevelMaker
+git clone https://github.com/ruffbuff/Levelarium
+cd Levelarium
 ```
 
 ### Running the Application
 **1. Linux:**
-To run LevelMaker, use the following command in the project directory: `love .`,
-or use `run.sh` in the project directory.
+To run Levelarium, use the following command in the project directory: `love .`,
+or use `./run.sh` in the project directory.
 
 **2. Windows:**
 On Windows, you can drag the project folder onto the `love.exe` file.

@@ -1,2 +1,10 @@
-assets/*
-level.txt
+levels/
+
+.claude/
+.crush/
+.gemini/
+
+CLAUDE.md
+CRUSH.md
+GEMINI.md
+TODO.md

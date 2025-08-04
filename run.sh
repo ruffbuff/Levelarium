@@ -1,2 +1,2 @@
 #!/bin/bash
-love LevelMaker.love
+love .

@@ -1,12 +1,12 @@
 function love.conf(t)
-    t.identity = "LevelMaker"
+    t.identity = "Levelarium"
     t.version = "11.5"
     t.console = false
 
     local settings = require("scripts.settings")
 
-    t.window.title = settings.NAME .. " - v" .. settings.VERSION
-    t.window.icon = "assets/14.png"
+    t.window.title = settings.getWindowTitle()
+    t.window.icon = settings.assetsPath .. settings.iconFile
     t.window.width = settings.gridWidth * settings.tileSize
     t.window.height = settings.gridHeight * settings.tileSize
     t.window.borderless = false
