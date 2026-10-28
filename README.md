@@ -5,6 +5,7 @@ Levelarium is a versatile and user-friendly level editor built with LÖVE2D. It 
 - Intuitive tile-based level editing
 - Multiple drawing tools: Brush, Eraser, Bucket Fill, Line, and Rectangle
 - Multiple layers (up to 5)
+- Undo / redo (`Ctrl+Z`, `Ctrl+Y`), atomic saving
 - Customizable grid size and tile set
 - Camera pan and zoom for easy navigation
 - Eyedropper: right click picks the tile under the cursor
@@ -47,6 +48,7 @@ On Windows, you can drag the project folder onto the `love.exe` file.
 - `T` - choose an asset pack
 - `C` - change the canvas (grid) size
 - `F` - choose the save format (TXT, JSON, TMX)
+- `Ctrl+Z` - undo, `Ctrl+Y` or `Ctrl+Shift+Z` - redo (100 steps; cleared when a level is loaded or created)
 - `P` - save, `Ctrl+S` - quick save under the current name and format, `L` - open a saved level (TXT)
 - `Esc` - back to the main menu (your work stays open, choose **Continue** to return to it)
 
@@ -85,13 +87,22 @@ LEVELARIUM_UPDATE_URL=http://127.0.0.1:8000/release.json LEVELARIUM_TEST_VERSION
 Levels are saved to the `levels/` folder of the project (when started with `love .`);
 in a packaged build they go to the LÖVE save directory.
 
+TXT files keep the asset pack and tile size in the header (`w,h,layers,pack,tileSize`); older files without them
+still open. TMX export copies the used tiles to `tiles/<pack>/` next to the `.tmx` so Tiled finds them.
+
 ### Changing Grid Size
 Press `C` in the editor, enter the new width and height (1-1000) and confirm with `Enter`.
 Tiles outside a smaller canvas are removed. The default size for a new session can still be
 changed with `gridWidth` and `gridHeight` in `scripts/settings.lua`.
 
+### Building releases
+`packaging/build.sh [version]` builds into `dist/` (git-ignored); pick targets with
+`TARGETS="love win installer appimage"` (default: all). It downloads the official LÖVE 11.5 builds.
+Needs `bash`, `curl`, `python3`; the installer needs `makensis` (NSIS), the AppImage needs `file`
+and runs `appimagetool` (downloaded). The script writes `SHA256SUMS.txt`.
+
 ### Running the tests
-The pure logic (`scripts/level.lua`: TXT/JSON/TMX, flood fill, lines; `version.lua`, `files.lua`,
+The pure logic (`scripts/level.lua`: TXT/JSON/TMX, flood fill, lines; `history.lua` undo/redo; `fileio.lua` atomic write; `version.lua`, `files.lua`,
 `list.lua` and `updater.lua` parsing: version comparison, file list sorting, list scrolling) has tests
 that do not need LÖVE:
 ```bash

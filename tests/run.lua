@@ -6,6 +6,8 @@ local version = require("scripts.version")
 local files = require("scripts.files")
 local List = require("scripts.list")
 local updater = require("scripts.updater")
+local History = require("scripts.history")
+local fileio = require("scripts.fileio")
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -357,6 +359,282 @@ test("List: rowAt и режим allowNone", function()
     local save = List.new(5, true); save:setItems(numbered(3), 0)
     eq(save.selected, 0); eq(save:current(), nil)
     save:move(1); eq(save.selected, 1)
+end)
+
+
+-- ------------------------------------------------------------ 1.2.1: TXT с набором тайлов
+test("toTxt: набор тайлов и размер тайла в заголовке, round-trip", function()
+    local layers = sampleLayers()
+    local txt = level.toTxt(layers, 3, 3, {pack = "itach/v1", tileSize = 32})
+    eq(txt:match("^[^\n]+"), "3,3,2,itach/v1,32")
+    local back, w, h, meta = level.parseTxt(txt)
+    eq(w, 3); eq(h, 3); eq(meta.pack, "itach/v1"); eq(meta.tileSize, 32)
+    local ok, why = sameLayers(layers, back, 3, 3)
+    assert(ok, why)
+end)
+
+test("parseTxt: старый заголовок (без набора) открывается, meta пуста", function()
+    local back, w, h, meta = level.parseTxt("3,3,2\n5,0,2\n0,0,0\n0,64,0\n---\n0,0,0\n0,7,0\n0,0,0\n---\n")
+    eq(w, 3); eq(#back, 2); eq(back[1][1][3], 2); eq(meta.pack, nil)
+    -- и заголовок вида "w,h" без числа слоёв
+    local _, w2, h2, meta2 = level.parseTxt("2,2\n1,0\n0,0\n---\n")
+    eq(w2, 2); eq(h2, 2); eq(meta2.pack, nil)
+end)
+
+test("toTxt без meta даёт прежний заголовок; небезопасное имя набора не пишется", function()
+    eq(level.toTxt({{}}, 2, 1):match("^[^\n]+"), "2,1,1")
+    eq(level.toTxt({{}}, 2, 1, {pack = "../evil", tileSize = 32}):match("^[^\n]+"), "2,1,1")
+    local _, _, _, meta = level.parseTxt("2,1,1,../evil,32\n0,0\n---\n")
+    eq(meta.pack, nil, "../ в заголовке игнорируется")
+end)
+
+test("toTxt: набор без размера тайла и имя с цифрами в конце", function()
+    local _, _, _, meta = level.parseTxt(level.toTxt({{}}, 2, 1, {pack = "pack/v12"}))
+    eq(meta.pack, "pack/v12"); eq(meta.tileSize, nil)
+end)
+
+test("toJson: tileSize и pack в начале", function()
+    eq(level.toJson({{}}, 1, 1, 32, "itach/v1"),
+        '{"width":1,"height":1,"tileSize":32,"pack":"itach/v1","layers":[{"name":"Layer 1","data":[[0]]}]}')
+    eq(level.toJson({{}}, 1, 1, 32):find('"pack"'), nil)
+end)
+
+test("toTmx: tilewidth равен реальному размеру PNG, пути относительные", function()
+    local tiles = {{source = "tiles/itach_v1/1.png", width = 32, height = 32}}
+    local tmx = level.toTmx({{}}, 2, 2, 32, tiles)
+    assert(tmx:find('tilewidth="32" tileheight="32" infinite', 1, true), "карта")
+    assert(tmx:find('<tileset firstgid="1" name="tiles" tilewidth="32" tileheight="32"', 1, true), "тайлсет")
+    assert(tmx:find('source="tiles/itach_v1/1.png" width="32" height="32"', 1, true))
+    assert(not tmx:find("../assets", 1, true))
+    eq(level.packSlug("itach/v1"), "itach_v1")
+end)
+
+test("files.cleanName: имена устройств Windows запрещены", function()
+    eq(files.cleanName("con"), nil); eq(files.cleanName(" NUL "), nil)
+    eq(files.cleanName("com1"), nil); eq(files.cleanName("LPT9"), nil)
+    eq(files.cleanName("console"), "console"); eq(files.cleanName("my level"), "my level")
+end)
+
+-- ------------------------------------------------------------ 1.2.1: заливка по строкам
+test("floodFill: сложная область (змейка), onSet и счётчик", function()
+    -- 5x5: стена из 2 с проёмами - заливка обязана пройти змейкой
+    local layer = {
+        [2] = {[1] = 2, [2] = 2, [3] = 2, [4] = 2},
+        [4] = {[2] = 2, [3] = 2, [4] = 2, [5] = 2},
+    }
+    local seen = {}
+    local n = level.floodFill(layer, 5, 5, 1, 1, nil, 9, function(x, y) seen[#seen + 1] = x .. "," .. y end)
+    -- пустых клеток: 25 - 8 стен = 17, все связаны змейкой
+    eq(n, 17); eq(#seen, 17)
+    eq(layer[5][1], 9, "дошли до последнего ряда"); eq(layer[2][1], 2, "стена цела")
+    eq(layer[1][5], 9); eq(layer[3][5], 9); eq(layer[5][5], 9)
+end)
+
+test("floodFill: изолированная клетка не затекает через диагональ", function()
+    local layer = {[1] = {[2] = 1}, [2] = {[1] = 1}}
+    level.floodFill(layer, 2, 2, 1, 1, nil, 5)
+    eq(layer[1][1], 5); eq(layer[2][2], nil)
+end)
+
+test("floodFill: 1000x1000 быстро и вне границ ничего не делает", function()
+    local layer = {}
+    local start = os.clock()
+    local n = level.floodFill(layer, 1000, 1000, 500, 500, nil, 1)
+    eq(n, 1000000)
+    assert(os.clock() - start < 1.5, "заливка 1000x1000 слишком медленная: " .. (os.clock() - start))
+    eq(level.floodFill({}, 3, 3, 0, 1, nil, 1), 0)
+    eq(level.floodFill({}, 3, 3, 4, 1, nil, 1), 0)
+end)
+
+-- ------------------------------------------------------------ 1.2.1: история undo/redo
+local function paint(h, layers, li, x, y, value)
+    h:record(layers, li, x, y)
+    layers[li][y] = layers[li][y] or {}
+    layers[li][y][x] = value
+end
+
+test("history: мазок из нескольких клеток = один шаг, undo и redo", function()
+    local layers = {{}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 5); paint(h, layers, 1, 2, 1, 5); paint(h, layers, 1, 3, 1, 5)
+    assert(h:commit(layers))
+    eq(layers[1][1][2], 5)
+    eq(h:undo(layers), 1)
+    eq(layers[1][1][1], nil); eq(layers[1][1][2], nil); eq(layers[1][1][3], nil)
+    assert(h:canRedo()); assert(not h:canUndo())
+    eq(h:redo(layers), 1)
+    eq(layers[1][1][1], 5); eq(layers[1][1][3], 5)
+    eq(h:redo(layers), nil, "redo пуст")
+end)
+
+test("history: возврат старого значения (перекраска и стирание)", function()
+    local layers = {{[1] = {[1] = 3}}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 7); h:commit(layers)       -- 3 -> 7
+    paint(h, layers, 1, 1, 1, nil); h:commit(layers)     -- 7 -> пусто
+    eq(layers[1][1][1], nil)
+    h:undo(layers); eq(layers[1][1][1], 7)
+    h:undo(layers); eq(layers[1][1][1], 3)
+    eq(h:undo(layers), nil, "больше нечего отменять")
+    h:redo(layers); h:redo(layers); eq(layers[1][1][1], nil)
+end)
+
+test("history: клетка, изменённая дважды за шаг, откатывается к исходной", function()
+    local layers = {{}}
+    local h = History.new()
+    paint(h, layers, 1, 2, 2, 4); paint(h, layers, 1, 2, 2, 6)
+    h:commit(layers)
+    eq(layers[1][2][2], 6)
+    h:undo(layers); eq(layers[1][2][2], nil)
+    h:redo(layers); eq(layers[1][2][2], 6)
+end)
+
+test("history: шаг без итоговых изменений не записывается", function()
+    local layers = {{[1] = {[1] = 3}}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 8); paint(h, layers, 1, 1, 1, 3)
+    eq(h:commit(layers), false)
+    assert(not h:canUndo())
+    eq(h:commit(layers), false, "commit без записей безопасен")
+end)
+
+test("history: новое действие сбрасывает redo", function()
+    local layers = {{}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 1); h:commit(layers)
+    paint(h, layers, 1, 2, 1, 2); h:commit(layers)
+    h:undo(layers)
+    assert(h:canRedo())
+    paint(h, layers, 1, 3, 1, 3); h:commit(layers)
+    assert(not h:canRedo(), "ветка redo должна пропасть")
+    eq(h:redo(layers), nil)
+end)
+
+test("history: лимит глубины - старые шаги выбрасываются", function()
+    local layers = {{}}
+    local h = History.new(3)
+    for i = 1, 5 do paint(h, layers, 1, i, 1, i); h:commit(layers) end
+    eq(#h.undoStack, 3)
+    for _ = 1, 10 do h:undo(layers) end
+    eq(layers[1][1][1], 1, "шаги 1-2 уже не откатить")
+    eq(layers[1][1][2], 2)
+    eq(layers[1][1][3], nil)
+end)
+
+test("history: потолок по числу клеток (большие заливки)", function()
+    local layers = {{}}
+    local h = History.new(100, 250)
+    for i = 1, 5 do
+        for x = 1, 100 do paint(h, layers, 1, x, i, i) end
+        h:commit(layers)
+    end
+    assert(#h.undoStack <= 2, "осталось слишком много шагов: " .. #h.undoStack)
+    assert(h.cells <= 250 or #h.undoStack == 1)
+end)
+
+test("history: несколько слоёв, undo возвращает номер слоя; reset очищает", function()
+    local layers = {{}, {}, {}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 1); h:commit(layers)
+    paint(h, layers, 3, 4, 4, 9); h:commit(layers)
+    eq(h:undo(layers), 3); eq(layers[3][4][4], nil); eq(layers[1][1][1], 1)
+    eq(h:undo(layers), 1)
+    h:redo(layers)
+    h:reset()
+    assert(not h:canUndo() and not h:canRedo())
+    eq(h:undo(layers), nil)
+end)
+
+test("history: undo забирает ещё не завершённое действие", function()
+    local layers = {{}}
+    local h = History.new()
+    paint(h, layers, 1, 1, 1, 5)       -- commit не вызывали
+    assert(h:canUndo())
+    eq(h:undo(layers), 1); eq(layers[1][1][1], nil)
+end)
+
+test("history: заливка через floodFill откатывается целиком", function()
+    local layers = {{[2] = {[2] = 4}}}
+    local h = History.new()
+    level.floodFill(layers[1], 6, 6, 1, 1, nil, 8, function(x, y) h:record(layers, 1, x, y) end)
+    h:commit(layers)
+    eq(layers[1][6][6], 8)
+    h:undo(layers)
+    eq(layers[1][6][6], nil); eq(layers[1][1][1], nil); eq(layers[1][2][2], 4, "стена цела")
+    h:redo(layers)
+    eq(layers[1][6][6], 8); eq(layers[1][2][2], 4)
+end)
+
+-- ------------------------------------------------------------ 1.2.1: атомарная запись
+local tmpBase = os.tmpname()
+os.remove(tmpBase)
+local function readAll(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local d = f:read("*a"); f:close(); return d
+end
+
+test("fileio.atomicWrite: новый файл и перезапись, временных файлов не остаётся", function()
+    local path = tmpBase .. "_a.txt"
+    assert(fileio.atomicWrite(path, "one"))
+    eq(readAll(path), "one")
+    assert(fileio.atomicWrite(path, "two"))
+    eq(readAll(path), "two")
+    eq(readAll(path .. ".tmp"), nil, "tmp убран")
+    eq(readAll(path .. ".bak"), nil, "bak убран")
+    os.remove(path)
+end)
+
+test("fileio.atomicWrite: нет папки -> ошибка, ничего не создано", function()
+    local ok, err = fileio.atomicWrite(tmpBase .. "_nodir/x/level.txt", "data")
+    eq(ok, false); assert(type(err) == "string" and #err > 0)
+end)
+
+test("fileio.atomicWrite: сбой записи не трогает старый файл", function()
+    local path = tmpBase .. "_b.txt"
+    assert(fileio.atomicWrite(path, "OLD"))
+    local removed
+    local ok = fileio.atomicWrite(path, "NEW", {
+        open = function(p, mode)
+            if p == path .. ".tmp" then
+                return {write = function() return nil, "disk full" end, close = function() return true end}
+            end
+            return io.open(p, mode)
+        end,
+        remove = function(p) removed = p; return os.remove(p) end,
+    })
+    eq(ok, false)
+    eq(readAll(path), "OLD", "старый файл цел")
+    eq(removed, path .. ".tmp", "временный файл удалён")
+    os.remove(path)
+end)
+
+test("fileio.atomicWrite: rename не заменяет файл (Windows) - идём через .bak", function()
+    local path = tmpBase .. "_c.txt"
+    assert(fileio.atomicWrite(path, "OLD"))
+    local ok = fileio.atomicWrite(path, "NEW", {
+        rename = function(from, to)
+            if readAll(to) and not to:find("%.bak$") then return nil, "exists" end -- как MSVCRT
+            return os.rename(from, to)
+        end,
+    })
+    assert(ok)
+    eq(readAll(path), "NEW"); eq(readAll(path .. ".bak"), nil)
+    os.remove(path)
+end)
+
+test("fileio.atomicWrite: не удалось поставить новый файл - старый возвращается", function()
+    local path = tmpBase .. "_d.txt"
+    assert(fileio.atomicWrite(path, "OLD"))
+    local ok = fileio.atomicWrite(path, "NEW", {
+        rename = function(from, to)
+            if from:find("%.tmp$") then return nil, "locked" end -- tmp -> path никогда не удаётся
+            return os.rename(from, to)
+        end,
+    })
+    eq(ok, false)
+    eq(readAll(path), "OLD", "старый уровень восстановлен из .bak")
+    os.remove(path); os.remove(path .. ".tmp"); os.remove(path .. ".bak")
 end)
 
 print(("\n%d passed, %d failed"):format(passed, failed))

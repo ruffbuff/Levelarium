@@ -1,0 +1,24 @@
+#!/bin/sh
+# AppRun for the Levelarium AppImage: LÖVE 11.5 runtime with the game fused in.
+if [ -z "$APPDIR" ]; then
+    APPDIR="$(dirname "$(readlink -f "$0")")"
+fi
+
+export LD_LIBRARY_PATH="$APPDIR/lib/:$LD_LIBRARY_PATH"
+
+if [ -z "$XDG_DATA_DIRS" ]; then
+    XDG_DATA_DIRS="/usr/local/share/:/usr/share/"
+fi
+export XDG_DATA_DIRS="$APPDIR/share/:$XDG_DATA_DIRS"
+
+if [ -z "$LUA_PATH" ]; then
+    LUA_PATH=";"
+fi
+export LUA_PATH="$APPDIR/share/luajit-2.1.0-beta3/?.lua;$APPDIR/share/lua/5.1/?.lua;$LUA_PATH"
+
+if [ -z "$LUA_CPATH" ]; then
+    LUA_CPATH=";"
+fi
+export LUA_CPATH="$APPDIR/lib/lua/5.1/?.so;$LUA_CPATH"
+
+exec "$APPDIR/bin/love" --fused "$APPDIR/Levelarium.love" "$@"

@@ -4,6 +4,8 @@ local files = require("scripts.files")
 local List = require("scripts.list")
 local ui = require("scripts.ui")
 local updater = require("scripts.updater")
+local fileio = require("scripts.fileio")
+local History = require("scripts.history")
 
 local assets = {}
 local assetFiles = {}  -- имена файлов, параллельно assets (нужны для экспорта TMX)
@@ -28,6 +30,8 @@ local tools = {"brush", "eraser", "bucket", "line", "rectangle"}
 local selectedTool = "brush"
 local startX, startY = nil, nil
 local previewX, previewY = nil, nil
+local strokeX, strokeY = nil, nil  -- последняя клетка текущего мазка кистью/ластиком (для интерполяции)
+local undoHistory = History.new(100)  -- Ctrl+Z / Ctrl+Y: до 100 шагов, шаг = мазок/заливка/линия/прямоугольник
 
 local availableAssetPacks = {}
 local selectedAssetPackIndex = 1
@@ -157,12 +161,15 @@ function deleteCurrentLayer()
     if #layers > 1 then
         table.remove(layers, currentLayer)
         currentLayer = math.min(currentLayer, #layers)
+        undoHistory:reset()  -- номера слоёв сдвинулись, старые шаги больше не применимы
         return true
     end
     return false
 end
 
 function updateCamera(dt)
+    -- Ctrl+S (и другие сочетания с Ctrl/Cmd) не должны двигать камеру
+    if love.keyboard.isDown("lctrl", "rctrl", "lgui", "rgui") then return end
     local speed = 500 * dt / camera.scale
     if love.keyboard.isDown("w") then camera.y = camera.y - speed end
     if love.keyboard.isDown("s") then camera.y = camera.y + speed end
@@ -196,13 +203,9 @@ function loadAssets()
         if success then
             table.insert(assets, image)
             table.insert(assetFiles, filename)
-            print("Loaded asset: " .. filename .. " from pack: " .. settings.currentAssetPack)
-        else
-            print("Failed to load asset: " .. filename)
         end
     end
     
-    print("Total assets loaded: " .. #assets .. " from pack: " .. settings.currentAssetPack)
 end
 
 function resizeCanvas(newWidth, newHeight)
@@ -214,18 +217,18 @@ function resizeCanvas(newWidth, newHeight)
     -- Если холст уменьшился, удаляем тайлы за его пределами
     -- (раньше цикл сравнивал новую ширину сама с собой и ничего не удалял)
     levelLib.trimLayers(layers, newWidth, newHeight)
+    undoHistory:reset()  -- обрезанные тайлы вернуть нельзя
 
     canvasWidthInput = tostring(gridWidth)
     canvasHeightInput = tostring(gridHeight)
-    print("Canvas resized to: " .. newWidth .. "x" .. newHeight)
 end
 
 function switchAssetPack(packIndex)
-    if packIndex >= 1 and packIndex <= #availableAssetPacks then
+    if packIndex >= 1 and packIndex <= #availableAssetPacks and availableAssetPacks[packIndex] ~= settings.currentAssetPack then
         selectedAssetPackIndex = packIndex
         settings.currentAssetPack = availableAssetPacks[packIndex]
-        print("Switched to asset pack: " .. settings.currentAssetPack)
         loadAssets()
+        setDirty(true)  -- набор тайлов хранится в файле уровня
         selectedTile = math.max(1, math.min(selectedTile, #assets))
         local maxScroll = math.max(0, math.ceil(#assets / visibleTilesX) - visibleTilesY)
         tileScrollOffset = math.min(tileScrollOffset, maxScroll)
@@ -268,12 +271,27 @@ function pickTile(x, y)
     end
 end
 
+-- Размер тайла в пикселях в исходных PNG набора (редактор рисует их с масштабом tileSize / этот размер)
+local function nativeTileSize()
+    local first = assets[1]
+    return first and first:getWidth() or tileSize
+end
+
+local function levelMeta()
+    return {pack = settings.currentAssetPack, tileSize = nativeTileSize()}
+end
+
 function generateTxtData()
-    return levelLib.toTxt(layers, gridWidth, gridHeight)
+    return levelLib.toTxt(layers, gridWidth, gridHeight, levelMeta())
 end
 
 function generateJsonData()
-    return levelLib.toJson(layers, gridWidth, gridHeight, tileSize)
+    return levelLib.toJson(layers, gridWidth, gridHeight, nativeTileSize(), settings.currentAssetPack)
+end
+
+-- Путь к PNG набора относительно папки с .tmx: тайлы копируются в levels/tiles/<набор>/ при сохранении
+local function tmxTileDir()
+    return "tiles/" .. levelLib.packSlug(settings.currentAssetPack)
 end
 
 function generateTmxData()
@@ -281,12 +299,12 @@ function generateTmxData()
     local tiles = {}
     for i, filename in ipairs(assetFiles) do
         tiles[i] = {
-            source = "../assets/" .. settings.currentAssetPack .. "/" .. filename,
+            source = tmxTileDir() .. "/" .. filename,
             width = assets[i]:getWidth(),
             height = assets[i]:getHeight()
         }
     end
-    return levelLib.toTmx(layers, gridWidth, gridHeight, tileSize, tiles)
+    return levelLib.toTmx(layers, gridWidth, gridHeight, nativeTileSize(), tiles)
 end
 
 -- Папка проекта, если игра запущена как `love .` (иначе nil: .love-архив или собранный exe)
@@ -310,26 +328,51 @@ local function ensureDirectory(path)
     end
 end
 
--- Пишет файл уровня. Возвращает true или false, причина.
+-- Пишет файл в папку уровней (relPath - путь внутри неё, например "a.txt" или "tiles/x/1.png").
+-- Возвращает true, полный путь  или  false, причину. Запись атомарная: сначала временный файл,
+-- затем переименование - при сбое прежний файл остаётся целым.
 -- При запуске из папки проекта уровни, как и раньше, лежат в <проект>/levels/,
 -- в собранной версии (.love / exe) - в папке сохранений LÖVE.
-local function writeLevelFile(filename, data)
+local function writeLevelFile(relPath, data)
+    local subdir = relPath:match("^(.*)/[^/]+$")
     local dir = projectDir()
     if dir then
-        local path = dir .. "/" .. settings.levelsPath .. filename
-        local file = io.open(path, "w")
-        if not file then
-            ensureDirectory(dir .. "/" .. settings.levelsPath)
-            file = io.open(path, "w")
+        local base = dir .. "/" .. settings.levelsPath
+        local path = base .. relPath
+        local ok, err = fileio.atomicWrite(path, data)
+        if not ok then
+            ensureDirectory(base .. (subdir or ""))
+            ok, err = fileio.atomicWrite(path, data)
         end
-        if not file then return false, path end
-        file:write(data)
-        file:close()
-        return true, path
+        if ok then return true, path end
+        return false, path .. " (" .. tostring(err) .. ")"
     end
-    love.filesystem.createDirectory(settings.levelsPath)
-    local ok, err = love.filesystem.write(settings.levelsPath .. filename, data)
-    return ok, love.filesystem.getSaveDirectory() .. "/" .. settings.levelsPath .. filename .. (err and (" (" .. err .. ")") or "")
+
+    love.filesystem.createDirectory(settings.levelsPath .. (subdir or ""))
+    local path = love.filesystem.getSaveDirectory() .. "/" .. settings.levelsPath .. relPath
+    local ok, err = fileio.atomicWrite(path, data)
+    if ok then return true, path end
+    -- запасной путь: LÖVE пишет сам (например, если в пути к профилю есть символы вне ANSI на Windows)
+    local ok2, err2 = love.filesystem.write(settings.levelsPath .. relPath, data)
+    if ok2 then return true, path end
+    return false, path .. " (" .. tostring(err2 or err) .. ")"
+end
+
+-- Копирует PNG текущего набора рядом с TMX, чтобы Tiled нашёл картинки по относительным путям.
+local function copyTmxTiles()
+    local packPath = settings.getAssetPackPath()
+    for _, filename in ipairs(assetFiles) do
+        local data = love.filesystem.read(packPath .. filename)
+        if data then
+            local rel = tmxTileDir() .. "/" .. filename
+            local info = love.filesystem.getInfo(settings.levelsPath .. rel)
+            if not (info and info.size == #data) then
+                local ok, err = writeLevelFile(rel, data)
+                if not ok then return false, err end
+            end
+        end
+    end
+    return true
 end
 
 -- Список файлов уровней нужного формата: {{name, ext, size, modtime}, ...}.
@@ -362,6 +405,11 @@ function saveLevel(levelName)
         data = generateTmxData()
     end
 
+    if format == "tmx" then
+        local copied, cerr = copyTmxTiles()
+        if not copied then return false, tostring(cerr) end
+    end
+
     local ok, path = writeLevelFile(levelName .. "." .. format, data)
     if not ok then
         return false, tostring(path)
@@ -379,7 +427,7 @@ function loadLevel(levelName)
         return false, "file not found"
     end
 
-    local newLayers, newWidth, newHeight = levelLib.parseTxt(data, {
+    local newLayers, newWidth, newHeight, meta = levelLib.parseTxt(data, {
         maxSize = settings.maxGridSize,
         maxLayers = maxLayers
     })
@@ -388,7 +436,22 @@ function loadLevel(levelName)
         return false, tostring(newWidth)
     end
 
+    -- набор тайлов из файла (1.2.1+); у старых файлов его нет - остаётся текущий
+    local warning
+    if meta and meta.pack and meta.pack ~= settings.currentAssetPack then
+        local found
+        for i, pack in ipairs(availableAssetPacks) do
+            if pack == meta.pack then found = i break end
+        end
+        if found then
+            switchAssetPack(found)
+        else
+            warning = "asset pack \"" .. meta.pack .. "\" not found, using " .. settings.currentAssetPack
+        end
+    end
+
     layers = newLayers
+    undoHistory:reset()
     gridWidth, gridHeight = newWidth, newHeight
     canvas.width = gridWidth * tileSize
     canvas.height = gridHeight * tileSize
@@ -403,7 +466,7 @@ function loadLevel(levelName)
     showMenu = false
     setDirty(false)
     refreshWindowTitle()
-    return true
+    return true, warning
 end
 
 -- ------------------------------------------------------------------ главное меню
@@ -468,6 +531,7 @@ end
 local function startNewLevel()
     layers = {}
     createNewLayer()
+    undoHistory:reset()
     gridWidth, gridHeight = settings.gridWidth, settings.gridHeight
     canvas.width, canvas.height = gridWidth * tileSize, gridHeight * tileSize
     canvasWidthInput, canvasHeightInput = tostring(gridWidth), tostring(gridHeight)
@@ -672,7 +736,7 @@ function drawHud()
         coordText(), saveFormats[selectedSaveFormat]:upper())
     ui.text(info, "small", "dim", 0, 11, W - 12, "right")
 
-    ui.text("Esc Menu   P Save   Ctrl+S Quick save   L Open   F Format   C Canvas size   T Asset pack",
+    ui.text("Esc Menu   P Save   Ctrl+S Quick save   Ctrl+Z/Y Undo/Redo   L Open   F Format   C Canvas size   T Asset pack",
         "small", "dim", 12, 30)
     ui.text("1-5 Tools   Right click Pick tile   N New layer   PgUp/PgDn Switch layer   Del Delete layer   WASD Pan   Wheel Zoom",
         "small", "dim", 12, 44)
@@ -683,6 +747,7 @@ function applyBrush(x, y)
         local row = layers[currentLayer][y] or {}
         layers[currentLayer][y] = row
         if row[x] ~= selectedTile then
+            undoHistory:record(layers, currentLayer, x, y)
             row[x] = selectedTile
             setDirty(true)
         end
@@ -693,6 +758,7 @@ function applyEraser(x, y)
     if x >= 1 and x <= gridWidth and y >= 1 and y <= gridHeight then
         local row = layers[currentLayer][y]
         if row and row[x] then
+            undoHistory:record(layers, currentLayer, x, y)
             row[x] = nil
             setDirty(true)
         end
@@ -705,13 +771,17 @@ function applyBucket(x, y)
         local targetTile = currentLayerData[y] and currentLayerData[y][x] or nil
         if targetTile ~= selectedTile then
             floodFill(x, y, targetTile, selectedTile)
+            undoHistory:commit(layers)
             setDirty(true)
         end
     end
 end
 
 function floodFill(x, y, targetTile, replacementTile)
-    levelLib.floodFill(layers[currentLayer], gridWidth, gridHeight, x, y, targetTile, replacementTile)
+    local layerIndex = currentLayer
+    levelLib.floodFill(layers[layerIndex], gridWidth, gridHeight, x, y, targetTile, replacementTile, function(px, py)
+        undoHistory:record(layers, layerIndex, px, py)
+    end)
 end
 
 function drawHoveredTile()
@@ -884,9 +954,29 @@ function drawOpenDialog()
     end
 
     ui.text("Up/Down, wheel - browse     Enter - open     Tab - sort by " ..
-        (openSort == "date" and "name" or "date") .. "     Esc - cancel", "small", "dim", x + 24, y + h - 62, w - 48)
+        (openSort == "date" and "name" or "date") .. "     O - open folder     Esc - cancel", "small", "dim", x + 24, y + h - 62, w - 48)
     ui.text("Folder: " .. settings.levelsPath .. "   (JSON and TMX files are exports and cannot be opened)",
         "small", "dim", x + 24, y + h - 40, w - 48)
+end
+
+-- Открывает папку с уровнями в файловом менеджере системы
+local function openLevelsFolder()
+    local dir = projectDir()
+    local path
+    if dir then
+        path = dir .. "/" .. settings.levelsPath
+        ensureDirectory(path)
+    else
+        love.filesystem.createDirectory(settings.levelsPath)
+        path = love.filesystem.getSaveDirectory() .. "/" .. settings.levelsPath
+    end
+    path = path:gsub("\\", "/")
+    if not path:match("^/") then path = "/" .. path end  -- Windows: C:/... -> file:///C:/...
+    if love.system.openURL("file://" .. path) then
+        ui.toast("Opened the levels folder", "info", 1.5)
+    else
+        ui.toast("Could not open the levels folder: " .. path, "err", 4)
+    end
 end
 
 local function openSelected()
@@ -896,7 +986,7 @@ local function openSelected()
         local ok, err = loadLevel(entry.name)
         if ok then
             modal = nil
-            ui.toast("Opened " .. entry.name .. ".txt", "ok")
+            ui.toast("Opened " .. entry.name .. ".txt" .. (err and (" - " .. err) or ""), err and "warn" or "ok", err and 4 or nil)
         else
             ui.toast("Could not open " .. entry.name .. ".txt: " .. tostring(err), "err", 4)
         end
@@ -911,6 +1001,7 @@ end
 
 local function openKey(key)
     if key == "escape" then modal = nil
+    elseif key == "o" then openLevelsFolder()
     elseif key == "up" then openList:move(-1)
     elseif key == "down" then openList:move(1)
     elseif key == "pageup" then openList:page(-1)
@@ -1227,6 +1318,26 @@ local function canvasKey(key)
     end
 end
 
+local function afterHistoryStep(layerIndex, verb)
+    if not layerIndex then
+        ui.toast("Nothing to " .. verb, "info", 1.2)
+        return
+    end
+    if layerIndex <= #layers then currentLayer = layerIndex end
+    startX, startY = nil, nil
+    setDirty(true)
+    ui.toast((verb == "undo" and "Undo" or "Redo") .. "  -  available: undo " .. #undoHistory.undoStack ..
+        ", redo " .. #undoHistory.redoStack, "info", 1.5)
+end
+
+function doUndo()
+    afterHistoryStep(undoHistory:undo(layers), "undo")
+end
+
+function doRedo()
+    afterHistoryStep(undoHistory:redo(layers), "redo")
+end
+
 local function editorKey(key)
     local ctrl = love.keyboard.isDown("lctrl", "rctrl", "lgui", "rgui")
     if ctrl and key == "s" then
@@ -1242,6 +1353,10 @@ local function editorKey(key)
         else
             openSaveDialog()
         end
+    elseif ctrl and key == "z" then
+        if love.keyboard.isDown("lshift", "rshift") then doRedo() else doUndo() end
+    elseif ctrl and key == "y" then
+        doRedo()
     elseif ctrl then
         return
     elseif key == "p" then openSaveDialog()
@@ -1325,8 +1440,10 @@ local function editorMousePressed(x, y, button)
         if tileX >= 1 and tileX <= gridWidth and tileY >= 1 and tileY <= gridHeight then
             if selectedTool == "brush" then
                 applyBrush(tileX, tileY)
+                strokeX, strokeY = tileX, tileY
             elseif selectedTool == "eraser" then
                 applyEraser(tileX, tileY)
+                strokeX, strokeY = tileX, tileY
             elseif selectedTool == "bucket" then
                 applyBucket(tileX, tileY)
             elseif selectedTool == "line" then
@@ -1385,21 +1502,28 @@ function love.mousemoved(x, y, dx, dy, istouch)
         if tileX >= 1 and tileX <= gridWidth and tileY >= 1 and tileY <= gridHeight and not isOverUi(x, y) then
             previewX, previewY = tileX, tileY
 
-            if love.mouse.isDown(1) then
-                if selectedTool == "brush" then
-                    applyBrush(tileX, tileY)
-                elseif selectedTool == "eraser" then
-                    applyEraser(tileX, tileY)
+            if love.mouse.isDown(1) and (selectedTool == "brush" or selectedTool == "eraser") then
+                -- между кадрами мышь перескакивает через клетки: закрашиваем всю линию от прошлой клетки мазка
+                local apply = selectedTool == "brush" and applyBrush or applyEraser
+                if strokeX then
+                    for _, pos in ipairs(levelLib.linePositions(strokeX, strokeY, tileX, tileY, gridWidth, gridHeight)) do
+                        apply(pos.x, pos.y)
+                    end
+                else
+                    apply(tileX, tileY)
                 end
+                strokeX, strokeY = tileX, tileY
             end
         else
             previewX, previewY = nil, nil
+            strokeX, strokeY = nil, nil
         end
     end
 end
 
 function love.mousereleased(x, y, button)
     if button ~= 1 then return end
+    strokeX, strokeY = nil, nil
     if editorActive() then
         local tileX = math.floor((x / camera.scale + camera.x) / tileSize) + 1
         local tileY = math.floor((y / camera.scale + camera.y) / tileSize) + 1
@@ -1419,6 +1543,7 @@ function love.mousereleased(x, y, button)
             startX, startY = nil, nil
         end
     end
+    undoHistory:commit(layers)  -- мазок / линия / прямоугольник закончены: один шаг истории
 end
 
 function love.textinput(text)

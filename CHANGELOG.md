@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-28
+
+### Added
+- Undo / redo: `Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`. One action = one step (a whole brush stroke, fill,
+  line, rectangle or eraser stroke). History depth is 100 and it is reset when a level is loaded or
+  created, a layer is deleted or the canvas is resized. New module `scripts/history.lua`.
+- Atomic saving (`scripts/fileio.lua`): the file is written to a temporary file and renamed, so a failed save
+  never corrupts the previous version; write errors are shown as a toast.
+- TXT files now store the asset pack and tile size in the header (`w,h,layers,pack,tileSize`); opening such a
+  file restores the pack. Old files and old readers keep working (the first three numbers are unchanged).
+- TMX export copies the used tile images next to the `.tmx` (`tiles/<pack>/N.png`).
+- `O` in the Open screen opens the levels folder.
+- `packaging/`: build scripts for the `.love` file, a Windows x64 zip, an NSIS installer and a Linux AppImage
+  (`packaging/build.sh`).
+
+### Fixed
+- TMX: correct relative tile paths and `tilewidth`/`tileheight` equal to the real PNG size (32).
+- `Ctrl+S` no longer pans the camera (`S` of WASD).
+- Fast mouse strokes no longer leave gaps (positions between mouse events are interpolated).
+- Bucket fill is iterative (scanline), so large areas no longer hit the recursion limit or freeze.
+- Windows reserved file names (`CON`, `NUL`, ...) are rejected as level names; the unsaved mark is set when the
+  asset pack is switched; debug output removed from the console.
+
+### Changed
+- `tileSize` in JSON/TMX is now the real PNG size (32) instead of the editor display size (64).
+
 ## [1.2.0] - 2026-10-28
 
 ### Added

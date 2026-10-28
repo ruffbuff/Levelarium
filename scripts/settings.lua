@@ -1,6 +1,6 @@
 local settings = {
     NAME = "Levelarium",
-    VERSION = "1.2.0",
+    VERSION = "1.2.1",
     AUTHOR = "ruffbuff",
     tileSize = 64,
     gridWidth = 50,
