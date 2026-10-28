@@ -1,6 +1,6 @@
 local settings = {
     NAME = "Levelarium",
-    VERSION = "1.1.0",
+    VERSION = "1.2.0",
     AUTHOR = "ruffbuff",
     tileSize = 64,
     gridWidth = 50,
@@ -9,7 +9,10 @@ local settings = {
     assetsPath = "assets/",
     iconFile = "app-image.png",
     currentAssetPack = "itach/v1",
-    levelsPath = "levels/"
+    levelsPath = "levels/",
+    checkUpdates = true,  -- при запуске в фоне проверять GitHub Releases (нужен curl); false - отключить
+    updateUrl = "https://api.github.com/repos/ruffbuff/Levelarium/releases/latest",
+    releasesPage = "https://github.com/ruffbuff/Levelarium/releases/latest"
 }
 
 function settings.getFullTitle()
