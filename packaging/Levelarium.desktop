@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Levelarium
+Comment=2D level editor (LÖVE2D)
+Exec=Levelarium %f
+Type=Application
+Categories=Development;Graphics;Game;
+Terminal=false
+Icon=Levelarium

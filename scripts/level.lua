@@ -15,10 +15,29 @@ end
 
 -- ---------------------------------------------------------------- TXT
 
---- Формат: первая строка "ширина,высота,слоёв", затем по `высота` строк на слой
---- (значения через запятую, 0 = пусто) и строка "---" после каждого слоя.
-function level.toTxt(layers, width, height)
-    local out = {width, ",", height, ",", #layers, "\n"}
+--- Имя набора тайлов, допустимое в заголовке: буквы, цифры, _ - . пробел и / между частями (без "..").
+function level.isSafePackName(name)
+    return type(name) == "string" and #name > 0 and #name <= 100
+        and name:match("^[%w_%-%. /]+$") ~= nil and not name:find("..", 1, true)
+        and not name:find("^/") and not name:find("/$")
+end
+
+--- Короткое имя папки из имени набора ("itach/v1" -> "itach_v1") для файлов рядом с TMX.
+function level.packSlug(pack)
+    return (tostring(pack):gsub("[^%w_%-]", "_"))
+end
+
+--- Формат: первая строка "ширина,высота,слоёв[,набор тайлов,размер тайла]", затем по `высота` строк
+--- на слой (значения через запятую, 0 = пусто) и строка "---" после каждого слоя.
+--- meta = {pack = "itach/v1", tileSize = 32} необязательна: без неё заголовок как в версиях до 1.2.1.
+--- Старые версии читают только первые два числа, поэтому новые файлы открываются и в них.
+function level.toTxt(layers, width, height, meta)
+    local out = {width, ",", height, ",", #layers}
+    if meta and meta.pack and level.isSafePackName(meta.pack) then
+        out[#out + 1] = "," .. meta.pack
+        if meta.tileSize then out[#out + 1] = "," .. meta.tileSize end
+    end
+    out[#out + 1] = "\n"
     for _, layer in ipairs(layers) do
         for y = 1, height do
             local row = layer[y]
@@ -33,7 +52,8 @@ function level.toTxt(layers, width, height)
     return join(out)
 end
 
---- Разбор TXT. Возвращает layers, width, height либо nil, "сообщение об ошибке".
+--- Разбор TXT. Возвращает layers, width, height, meta либо nil, "сообщение об ошибке".
+--- meta = {pack = ..., tileSize = ...} - поля заполнены, только если они есть в заголовке (файлы 1.2.1+).
 --- opts.maxSize  - максимально допустимый размер сетки (по умолчанию 1000)
 --- opts.maxLayers - сколько слоёв читать максимум (по умолчанию без ограничения)
 function level.parseTxt(data, opts)
@@ -55,6 +75,15 @@ function level.parseTxt(data, opts)
     local w, h = tonumber(headerW), tonumber(headerH)
     if not w or not h or w < 1 or h < 1 or w > maxSize or h > maxSize then
         return nil, "invalid header"
+    end
+
+    -- необязательные поля заголовка: ширина,высота,слоёв,набор,размер тайла
+    local meta = {}
+    local fields = {}
+    for field in (lines[1] .. ","):gmatch("%s*([^,]*),") do fields[#fields + 1] = field:match("^(.-)%s*$") end
+    if fields[4] and level.isSafePackName(fields[4]) then
+        meta.pack = fields[4]
+        meta.tileSize = tonumber(fields[5])
     end
 
     local layers = {}
@@ -90,15 +119,21 @@ function level.parseTxt(data, opts)
     if rows > 0 then closeLayer() end -- файл без завершающего "---"
 
     if #layers == 0 then layers[1] = {} end -- всегда минимум один слой
-    return layers, w, h
+    return layers, w, h, meta
 end
 
 -- ---------------------------------------------------------------- JSON
 
 --- JSON со стабильным порядком ключей:
---- {"width":W,"height":H,"tileSize":T,"layers":[{"name":"Layer 1","data":[[...],...]}]}
-function level.toJson(layers, width, height, tileSize)
-    local out = {'{"width":', width, ',"height":', height, ',"tileSize":', tileSize, ',"layers":['}
+--- {"width":W,"height":H,"tileSize":T,["pack":"itach/v1",]"layers":[{"name":"Layer 1","data":[[...],...]}]}
+--- tileSize - размер тайла в пикселях в исходных PNG набора; pack - необязательное имя набора.
+function level.toJson(layers, width, height, tileSize, pack)
+    local out = {'{"width":', width, ',"height":', height, ',"tileSize":', tileSize}
+    if pack and level.isSafePackName(pack) then
+        out[#out + 1] = ',"pack":"' .. pack .. '"'
+    end
+    out[#out + 1] = ',"layers":['
+
     for index, layer in ipairs(layers) do
         if index > 1 then out[#out + 1] = "," end
         out[#out + 1] = '{"name":"Layer ' .. index .. '","data":['
@@ -121,7 +156,9 @@ end
 -- ---------------------------------------------------------------- TMX
 
 --- TMX (Tiled). Тайлсет - "коллекция изображений": каждый тайл это отдельный PNG.
---- tiles = { {source = "../assets/pack/1.png", width = 64, height = 64}, ... },
+--- tileSize - реальный размер тайла в пикселях (размер PNG), он же tilewidth/tileheight карты.
+--- tiles = { {source = "tiles/itach_v1/1.png", width = 32, height = 32}, ... },
+--- пути относительны папки с .tmx (main.lua копирует PNG набора туда при сохранении);
 --- номер тайла в слое i соответствует gid = i (firstgid = 1), то есть tile id = i - 1.
 function level.toTmx(layers, width, height, tileSize, tiles)
     tiles = tiles or {}
@@ -205,34 +242,56 @@ function level.linePositions(x1, y1, x2, y2, width, height)
     return positions
 end
 
---- Итеративная заливка (без рекурсии: рекурсивная версия падала с stack overflow
---- на больших пустых областях). replacement == nil стирает область.
-function level.floodFill(layer, width, height, x, y, target, replacement)
-    if target == replacement then return end
-    local stack = {{x, y}}
-    while #stack > 0 do
-        local pos = table.remove(stack)
-        local px, py = pos[1], pos[2]
-        if px >= 1 and px <= width and py >= 1 and py <= height then
-            local row = layer[py]
-            local current = row and row[px] or nil
-            if current == target then
-                if replacement then
-                    if not row then
-                        row = {}
-                        layer[py] = row
+--- Итеративная построчная заливка (scanline): без рекурсии и без таблицы на каждую клетку,
+--- поэтому пустой холст 1000x1000 заливается быстро и почти без лишней памяти.
+--- replacement == nil стирает область. onSet(x, y) (необязательно) вызывается перед каждым изменением
+--- клетки - так история undo запоминает старое значение. Возвращает число изменённых клеток.
+function level.floodFill(layer, width, height, x, y, target, replacement, onSet)
+    if target == replacement then return 0 end
+    if x < 1 or x > width or y < 1 or y > height then return 0 end
+
+    local stack, n = {x, y}, 2 -- плоский стек: пары x, y
+    local count = 0
+    while n > 0 do
+        local sy, sx = stack[n], stack[n - 1]
+        n = n - 2
+        local row = layer[sy]
+        if (row and row[sx]) == target then
+            local left, right = sx, sx
+            while left > 1 and (row and row[left - 1]) == target do left = left - 1 end
+            while right < width and (row and row[right + 1]) == target do right = right + 1 end
+
+            if replacement and not row then
+                row = {}
+                layer[sy] = row
+            end
+            for px = left, right do
+                if onSet then onSet(px, sy) end
+                row[px] = replacement
+            end
+            count = count + (right - left + 1)
+
+            -- соседние строки: по одному зерну на каждый непрерывный отрезок целевого цвета
+            for ny = sy - 1, sy + 1, 2 do
+                if ny >= 1 and ny <= height then
+                    local nrow = layer[ny]
+                    local inRun = false
+                    for px = left, right do
+                        if (nrow and nrow[px]) == target then
+                            if not inRun then
+                                stack[n + 1], stack[n + 2] = px, ny
+                                n = n + 2
+                                inRun = true
+                            end
+                        else
+                            inRun = false
+                        end
                     end
-                    row[px] = replacement
-                else
-                    row[px] = nil
                 end
-                stack[#stack + 1] = {px + 1, py}
-                stack[#stack + 1] = {px - 1, py}
-                stack[#stack + 1] = {px, py + 1}
-                stack[#stack + 1] = {px, py - 1}
             end
         end
     end
+    return count
 end
 
 return level

@@ -9,10 +9,16 @@ function files.splitName(filename)
 end
 
 -- Имя уровня из поля ввода: без пробелов по краям, только буквы/цифры/пробел/_/-.
--- Возвращает nil, если имя пустое или содержит недопустимые символы.
+-- Возвращает nil, если имя пустое, содержит недопустимые символы или совпадает с именем устройства Windows.
 function files.cleanName(s)
     s = (s or ""):match("^%s*(.-)%s*$")
     if s == "" or #s > 64 or not s:match("^[%w%s_%-]+$") then return nil end
+    -- имена устройств Windows (CON, NUL, COM1...) нельзя использовать как файлы
+    local base = s:upper()
+    if base == "CON" or base == "PRN" or base == "AUX" or base == "NUL"
+        or base:match("^COM%d$") or base:match("^LPT%d$") then
+        return nil
+    end
     return s
 end
 
