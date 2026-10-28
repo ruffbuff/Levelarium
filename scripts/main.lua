@@ -1,6 +1,8 @@
 local settings = require("scripts.settings")
+local levelLib = require("scripts.level")
 
 local assets = {}
+local assetFiles = {}  -- имена файлов, параллельно assets (нужны для экспорта TMX)
 local tileSize = settings.tileSize
 local gridWidth = settings.gridWidth
 local gridHeight = settings.gridHeight
@@ -44,6 +46,10 @@ local canvasWidthInput = tostring(settings.gridWidth)
 local canvasHeightInput = tostring(settings.gridHeight)
 local activeCanvasField = 1 -- 1 для width, 2 для height
 
+-- love.keypressed и love.textinput для одной и той же клавиши приходят в одном кадре.
+-- Без этого флага клавиша, открывшая диалог (например P), попадала в поле ввода.
+local ignoreTextInput = false
+
 local camera = {
     x = 0, y = 0, scale = 1,
     minScale = 0.1, maxScale = 2
@@ -66,6 +72,7 @@ function love.load()
 end
 
 function love.update(dt)
+    ignoreTextInput = false  -- события клавиатуры текущего кадра уже обработаны
     if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         updateCamera(dt)
     end
@@ -81,6 +88,7 @@ end
 
 function loadAssets()
     assets = {}
+    assetFiles = {}
     local packPath = settings.getAssetPackPath()
     local files = love.filesystem.getDirectoryItems(packPath)
     local imageFiles = {}
@@ -94,7 +102,8 @@ function loadAssets()
     table.sort(imageFiles, function(a, b)
         local numA = tonumber(a:match("(%d+)%.png$")) or 0
         local numB = tonumber(b:match("(%d+)%.png$")) or 0
-        return numA < numB
+        if numA ~= numB then return numA < numB end
+        return a < b  -- стабильный порядок для файлов с одинаковым номером
     end)
     
     for _, filename in ipairs(imageFiles) do
@@ -102,6 +111,7 @@ function loadAssets()
         local success, image = pcall(love.graphics.newImage, path)
         if success then
             table.insert(assets, image)
+            table.insert(assetFiles, filename)
             print("Loaded asset: " .. filename .. " from pack: " .. settings.currentAssetPack)
         else
             print("Failed to load asset: " .. filename)
@@ -145,24 +155,13 @@ function resizeCanvas(newWidth, newHeight)
     gridHeight = newHeight
     canvas.width = gridWidth * tileSize
     canvas.height = gridHeight * tileSize
-    
-    -- Обрезаем или расширяем существующие слои
-    for layerIndex, layer in ipairs(layers) do
-        for y = 1, newHeight do
-            if not layer[y] then
-                layer[y] = {}
-            end
-            -- Удаляем лишние тайлы, если холст стал меньше
-            for x = newWidth + 1, gridWidth do
-                layer[y][x] = nil
-            end
-        end
-        -- Удаляем лишние строки, если холст стал меньше по высоте
-        for y = newHeight + 1, #layer do
-            layer[y] = nil
-        end
-    end
-    
+
+    -- Если холст уменьшился, удаляем тайлы за его пределами
+    -- (раньше цикл сравнивал новую ширину сама с собой и ничего не удалял)
+    levelLib.trimLayers(layers, newWidth, newHeight)
+
+    canvasWidthInput = tostring(gridWidth)
+    canvasHeightInput = tostring(gridHeight)
     print("Canvas resized to: " .. newWidth .. "x" .. newHeight)
 end
 
@@ -172,14 +171,46 @@ function switchAssetPack(packIndex)
         settings.currentAssetPack = availableAssetPacks[packIndex]
         print("Switched to asset pack: " .. settings.currentAssetPack)
         loadAssets()
-        selectedTile = math.min(selectedTile, #assets)
+        selectedTile = math.max(1, math.min(selectedTile, #assets))
+        local maxScroll = math.max(0, math.ceil(#assets / visibleTilesX) - visibleTilesY)
+        tileScrollOffset = math.min(tileScrollOffset, maxScroll)
     end
 end
 
-function isInsidePaletteArea(x, y)
-    local paletteHeight = 100
-    local paletteWidth = love.graphics.getWidth() - 100
-    return y > love.graphics.getHeight() - paletteHeight and x < paletteWidth
+-- true, если точка находится над панелью инструментов (справа) или палитрой тайлов (снизу)
+function isOverUi(x, y)
+    return x >= love.graphics.getWidth() - 100 or y > love.graphics.getHeight() - paletteHeight
+end
+
+-- Пипетка: берёт тайл под курсором (сначала из текущего слоя, затем из верхних слоёв вниз)
+function pickTile(x, y)
+    if isOverUi(x, y) then return end
+    local tileX = math.floor((x / camera.scale + camera.x) / tileSize) + 1
+    local tileY = math.floor((y / camera.scale + camera.y) / tileSize) + 1
+    if tileX < 1 or tileX > gridWidth or tileY < 1 or tileY > gridHeight then return end
+
+    local function tileAt(layer)
+        return layer and layer[tileY] and layer[tileY][tileX]
+    end
+
+    local tile = tileAt(layers[currentLayer])
+    if not tile then
+        for i = #layers, 1, -1 do
+            tile = tileAt(layers[i])
+            if tile then break end
+        end
+    end
+
+    if tile and assets[tile] then
+        selectedTile = tile
+        selectedTool = "brush"
+        -- прокручиваем палитру, чтобы выбранный тайл был виден
+        local row = math.floor((tile - 1) / visibleTilesX)
+        if row < tileScrollOffset or row >= tileScrollOffset + visibleTilesY then
+            local maxScroll = math.max(0, math.ceil(#assets / visibleTilesX) - visibleTilesY)
+            tileScrollOffset = math.min(row, maxScroll)
+        end
+    end
 end
 
 function love.draw()
@@ -312,6 +343,7 @@ function drawInfo()
     love.graphics.print("N - New Layer, PgUp/PgDn - Switch Layer, Del - Delete Layer", 10, 110)
     love.graphics.print("Asset Pack: " .. settings.currentAssetPack .. " (T - Toggle)", 10, 130)
     love.graphics.print("Assets: " .. #assets, 10, 150)
+    love.graphics.print("Right click - Pick tile under cursor", 10, 170)
 end
 
 function love.wheelmoved(x, y)
@@ -355,8 +387,9 @@ function love.keypressed(key)
             end
         elseif showLevelNameInput then
             if key == "return" then
-                if levelNameInput ~= "" then
-                    saveLevel(levelNameInput)
+                local trimmed = levelNameInput:match("^%s*(.-)%s*$")
+                if trimmed ~= "" then
+                    saveLevel(trimmed)
                     showLevelNameInput = false
                     levelNameInput = ""
                 end
@@ -393,9 +426,12 @@ function love.keypressed(key)
             if key == "return" then
                 local newWidth = tonumber(canvasWidthInput)
                 local newHeight = tonumber(canvasHeightInput)
-                if newWidth and newHeight and newWidth > 0 and newHeight > 0 then
+                local maxSize = settings.maxGridSize
+                if newWidth and newHeight and newWidth > 0 and newHeight > 0
+                    and newWidth <= maxSize and newHeight <= maxSize then
                     resizeCanvas(newWidth, newHeight)
                     showCanvasSettings = false
+                    activeCanvasField = 1
                 end
             elseif key == "escape" then
                 showCanvasSettings = false
@@ -426,7 +462,12 @@ function love.keypressed(key)
             elseif key == "pagedown" then switchLayer(currentLayer - 1)
             elseif key == "delete" then deleteCurrentLayer()
             elseif key == "f" then showSaveFormatSelector = true
-            elseif key == "c" then showCanvasSettings = true
+            elseif key == "c" then
+                canvasWidthInput = tostring(gridWidth)
+                canvasHeightInput = tostring(gridHeight)
+                activeCanvasField = 1
+                ignoreTextInput = true
+                showCanvasSettings = true
             end
         end
     end
@@ -434,13 +475,23 @@ end
 
 function love.mousepressed(x, y, button)
     if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
+        if button == 2 then
+            pickTile(x, y)  -- ПКМ: пипетка
+            return
+        elseif button ~= 1 then
+            return  -- остальные кнопки мыши ничего не рисуют
+        end
+
         if y > love.graphics.getHeight() - paletteHeight and x < love.graphics.getWidth() - 100 then
             local tileX = math.floor((x - 5) / tileButtonSize)
             local tileY = math.floor((y - (love.graphics.getHeight() - paletteHeight) - 5) / tileButtonSize)
-            local index = (tileScrollOffset + tileY) * visibleTilesX + tileX + 1
-            if index <= #assets then
-                selectedTile = index
-                selectedTool = "brush"
+            -- клик мимо отрисованных ячеек (отступ слева, правый край, третий "ряд") не выбирает тайл
+            if tileX >= 0 and tileX < visibleTilesX and tileY >= 0 and tileY < visibleTilesY then
+                local index = (tileScrollOffset + tileY) * visibleTilesX + tileX + 1
+                if index >= 1 and index <= #assets then
+                    selectedTile = index
+                    selectedTool = "brush"
+                end
             end
         elseif x > love.graphics.getWidth() - 100 then
             local toolIndex = math.floor(y / 50) + 1
@@ -493,7 +544,7 @@ function love.mousemoved(x, y, dx, dy, istouch)
         local tileX = math.floor(worldX / tileSize) + 1
         local tileY = math.floor(worldY / tileSize) + 1
         
-        if tileX >= 1 and tileX <= gridWidth and tileY >= 1 and tileY <= gridHeight then
+        if tileX >= 1 and tileX <= gridWidth and tileY >= 1 and tileY <= gridHeight and not isOverUi(x, y) then
             previewX, previewY = tileX, tileY
             
             if love.mouse.isDown(1) then
@@ -510,6 +561,7 @@ function love.mousemoved(x, y, dx, dy, istouch)
 end
 
 function love.mousereleased(x, y, button)
+    if button ~= 1 then return end
     if not showMenu and not showAssetPackSelector and not showLevelNameInput and not showLevelSelector and not showSaveFormatSelector and not showCanvasSettings then
         local tileX = math.floor((x / camera.scale + camera.x) / tileSize) + 1
         local tileY = math.floor((y / camera.scale + camera.y) / tileSize) + 1
@@ -532,15 +584,16 @@ function love.mousereleased(x, y, button)
 end
 
 function love.textinput(text)
+    if ignoreTextInput then return end
     if showLevelNameInput then
-        if text:match("[%w%s_%-]") then
+        if text:match("^[%w%s_%-]+$") and #levelNameInput + #text <= 64 then
             levelNameInput = levelNameInput .. text
         end
     elseif showCanvasSettings then
-        if text:match("[%d]") then
-            if activeCanvasField == 1 then
+        if text:match("^%d+$") then
+            if activeCanvasField == 1 and #canvasWidthInput + #text <= 4 then
                 canvasWidthInput = canvasWidthInput .. text
-            else
+            elseif activeCanvasField == 2 and #canvasHeightInput + #text <= 4 then
                 canvasHeightInput = canvasHeightInput .. text
             end
         end
@@ -548,161 +601,92 @@ function love.textinput(text)
 end
 
 function generateTxtData()
-    local data = gridWidth .. "," .. gridHeight .. "," .. #layers .. "\n"
-    for layerIndex, layer in ipairs(layers) do
-        for y = 1, gridHeight do
-            for x = 1, gridWidth do
-                local tileValue = layer[y] and layer[y][x] or 0
-                data = data .. tileValue
-                if x < gridWidth then
-                    data = data .. ","
-                end
-            end
-            data = data .. "\n"
-        end
-        data = data .. "---\n"
-    end
-    return data
+    return levelLib.toTxt(layers, gridWidth, gridHeight)
 end
 
 function generateJsonData()
-    local json = {
-        width = gridWidth,
-        height = gridHeight,
-        tileSize = tileSize,
-        layers = {}
-    }
-    
-    for layerIndex, layer in ipairs(layers) do
-        local layerData = {}
-        for y = 1, gridHeight do
-            layerData[y] = {}
-            for x = 1, gridWidth do
-                layerData[y][x] = layer[y] and layer[y][x] or 0
-            end
-        end
-        table.insert(json.layers, {
-            name = "Layer " .. layerIndex,
-            data = layerData
-        })
-    end
-    
-    -- Простая JSON сериализация
-    local function serializeTable(t)
-        if type(t) ~= "table" then
-            if type(t) == "string" then
-                return '"' .. t .. '"'
-            else
-                return tostring(t)
-            end
-        end
-        
-        local result = "{"
-        local first = true
-        for k, v in pairs(t) do
-            if not first then result = result .. "," end
-            first = false
-            result = result .. '"' .. k .. '":'
-            if type(v) == "table" then
-                if k == "data" then
-                    result = result .. "["
-                    for i = 1, #v do
-                        if i > 1 then result = result .. "," end
-                        result = result .. "["
-                        for j = 1, #v[i] do
-                            if j > 1 then result = result .. "," end
-                            result = result .. v[i][j]
-                        end
-                        result = result .. "]"
-                    end
-                    result = result .. "]"
-                elseif k == "layers" then
-                    result = result .. "["
-                    for i = 1, #v do
-                        if i > 1 then result = result .. "," end
-                        result = result .. serializeTable(v[i])
-                    end
-                    result = result .. "]"
-                else
-                    result = result .. serializeTable(v)
-                end
-            else
-                result = result .. serializeTable(v)
-            end
-        end
-        result = result .. "}"
-        return result
-    end
-    
-    return serializeTable(json)
+    return levelLib.toJson(layers, gridWidth, gridHeight, tileSize)
 end
 
 function generateTmxData()
-    local tmx = '<?xml version="1.0" encoding="UTF-8"?>\n'
-    tmx = tmx .. '<map version="1.10" tiledversion="1.10.1" orientation="orthogonal" renderorder="right-down" compressionlevel="0" width="' .. gridWidth .. '" height="' .. gridHeight .. '" tilewidth="' .. tileSize .. '" tileheight="' .. tileSize .. '" infinite="0" nextlayerid="' .. (#layers + 1) .. '" nextobjectid="1">\n'
-    
-    -- Tileset information
-    tmx = tmx .. ' <tileset firstgid="1" name="tiles" tilewidth="' .. tileSize .. '" tileheight="' .. tileSize .. '" tilecount="64" columns="8">\n'
-    tmx = tmx .. '  <image source="../assets/' .. settings.currentAssetPack .. '/1.png" width="' .. (tileSize * 8) .. '" height="' .. (tileSize * 8) .. '"/>\n'
-    tmx = tmx .. ' </tileset>\n'
-    
-    -- Layer data
-    for layerIndex, layer in ipairs(layers) do
-        tmx = tmx .. ' <layer id="' .. layerIndex .. '" name="Layer ' .. layerIndex .. '" width="' .. gridWidth .. '" height="' .. gridHeight .. '">\n'
-        tmx = tmx .. '  <data encoding="csv">\n'
-        
-        for y = 1, gridHeight do
-            for x = 1, gridWidth do
-                local tileValue = layer[y] and layer[y][x] or 0
-                tmx = tmx .. tileValue
-                if x < gridWidth or y < gridHeight then
-                    tmx = tmx .. ","
-                end
-            end
-            if y < gridHeight then
-                tmx = tmx .. "\n"
-            end
-        end
-        
-        tmx = tmx .. '\n  </data>\n'
-        tmx = tmx .. ' </layer>\n'
+    -- Тайлсет TMX описывает каждый PNG набора отдельным тайлом (gid = номер тайла)
+    local tiles = {}
+    for i, filename in ipairs(assetFiles) do
+        tiles[i] = {
+            source = "../assets/" .. settings.currentAssetPack .. "/" .. filename,
+            width = assets[i]:getWidth(),
+            height = assets[i]:getHeight()
+        }
     end
-    
-    tmx = tmx .. '</map>\n'
-    return tmx
+    return levelLib.toTmx(layers, gridWidth, gridHeight, tileSize, tiles)
+end
+
+-- Папка проекта, если игра запущена как `love .` (иначе nil: .love-архив или собранный exe)
+local function projectDir()
+    local source = love.filesystem.getSource()
+    local file = source and io.open(source .. "/main.lua", "r")
+    if file then
+        file:close()
+        return source
+    end
+    return nil
+end
+
+local function ensureDirectory(path)
+    -- без `mkdir -p`: на Windows такой команды нет
+    if love.system.getOS() == "Windows" then
+        local winPath = path:gsub("/", "\\")
+        os.execute('if not exist "' .. winPath .. '" mkdir "' .. winPath .. '"')
+    else
+        os.execute("mkdir -p '" .. path:gsub("'", "'\\''") .. "'")
+    end
+end
+
+-- Пишет файл уровня. Возвращает true или false, причина.
+-- При запуске из папки проекта уровни, как и раньше, лежат в <проект>/levels/,
+-- в собранной версии (.love / exe) - в папке сохранений LÖVE.
+local function writeLevelFile(filename, data)
+    local dir = projectDir()
+    if dir then
+        local path = dir .. "/" .. settings.levelsPath .. filename
+        local file = io.open(path, "w")
+        if not file then
+            ensureDirectory(dir .. "/" .. settings.levelsPath)
+            file = io.open(path, "w")
+        end
+        if not file then return false, path end
+        file:write(data)
+        file:close()
+        return true, path
+    end
+    love.filesystem.createDirectory(settings.levelsPath)
+    local ok, err = love.filesystem.write(settings.levelsPath .. filename, data)
+    return ok, love.filesystem.getSaveDirectory() .. "/" .. settings.levelsPath .. filename .. (err and (" (" .. err .. ")") or "")
 end
 
 function saveLevel(levelName)
     if not levelName or levelName == "" then
         showLevelNameInput = true
         levelNameInput = ""
+        ignoreTextInput = true
         return
     end
-    
-    -- Создаем папку levels используя стандартный Lua IO
-    os.execute("mkdir -p levels")
-    
+
     local format = saveFormats[selectedSaveFormat]
-    local data, filename
-    
+    local data
     if format == "txt" then
         data = generateTxtData()
-        filename = "levels/" .. levelName .. ".txt"
     elseif format == "json" then
         data = generateJsonData()
-        filename = "levels/" .. levelName .. ".json"
     elseif format == "tmx" then
         data = generateTmxData()
-        filename = "levels/" .. levelName .. ".tmx"
     end
-    
-    local file = io.open(filename, "w")
-    if file then
-        file:write(data)
-        file:close()
-        print("Level saved as: " .. levelName .. "." .. format .. " in project directory")
+
+    local ok, path = writeLevelFile(levelName .. "." .. format, data)
+    if ok then
+        print("Level saved: " .. path)
     else
-        print("Failed to save level: " .. levelName)
+        print("Failed to save level: " .. tostring(path))
     end
 end
 
@@ -712,77 +696,47 @@ function loadLevel(levelName)
         updateAvailableLevels()
         return
     end
-    
-    local filename = "levels/" .. levelName .. ".txt"
-    local file = io.open(filename, "r")
-    local data = nil
-    if file then
-        data = file:read("*all")
-        file:close()
-    end
-    
-    if data then
-        local lines = {}
-        for line in data:gmatch("[^\n]+") do
-            table.insert(lines, line)
-        end
-        
-        local dimensions = lines[1]:gmatch("[^,]+")
-        gridWidth = tonumber(dimensions())
-        gridHeight = tonumber(dimensions())
-        local layerCount = tonumber(dimensions())
-        canvas.width = gridWidth * tileSize
-        canvas.height = gridHeight * tileSize
-        
-        layers = {}
-        local currentLayerData = {}
-        local layerIndex = 1
-        
-        for i = 2, #lines do
-            if lines[i] == "---" then
-                table.insert(layers, currentLayerData)
-                currentLayerData = {}
-                layerIndex = layerIndex + 1
-            else
-                local row = {}
-                local x = 1
-                for tile in lines[i]:gmatch("[^,]+") do
-                    local tileValue = tonumber(tile)
-                    if tileValue ~= 0 then
-                        row[x] = tileValue
-                    end
-                    x = x + 1
-                end
-                table.insert(currentLayerData, row)
-            end
-        end
-        
-        if #currentLayerData > 0 then
-            table.insert(layers, currentLayerData)
-        end
-        
-        currentLayer = 1
-        print("Level loaded: " .. levelName)
-    else
+
+    local data = love.filesystem.read(settings.levelsPath .. levelName .. ".txt")
+    if not data then
         print("Failed to load level: " .. levelName)
+        return
     end
+
+    local newLayers, newWidth, newHeight = levelLib.parseTxt(data, {
+        maxSize = settings.maxGridSize,
+        maxLayers = maxLayers
+    })
+    if not newLayers then
+        -- newWidth содержит текст ошибки; текущий уровень не трогаем
+        print("Failed to load level " .. levelName .. ": " .. tostring(newWidth))
+        return
+    end
+
+    layers = newLayers
+    gridWidth, gridHeight = newWidth, newHeight
+    canvas.width = gridWidth * tileSize
+    canvas.height = gridHeight * tileSize
+    canvasWidthInput = tostring(gridWidth)
+    canvasHeightInput = tostring(gridHeight)
+    currentLayer = 1
+    startX, startY = nil, nil
+    print("Level loaded: " .. levelName)
 end
 
 function updateAvailableLevels()
     availableLevels = {}
-    
-    -- Используем стандартные возможности для чтения папки
-    local handle = io.popen('ls levels/*.txt 2>/dev/null')
-    if handle then
-        for filename in handle:lines() do
-            local levelName = filename:match("levels/(.*)%.txt$")
-            if levelName then
-                table.insert(availableLevels, levelName)
-            end
+    local seen = {}
+    -- love.filesystem видит и <проект>/levels, и папку сохранений; `ls` не нужен (его нет на Windows)
+    local dirName = settings.levelsPath:gsub("/$", "")
+    for _, filename in ipairs(love.filesystem.getDirectoryItems(dirName)) do
+        local levelName = filename:match("^(.*)%.txt$")
+        if levelName and not seen[levelName] then
+            seen[levelName] = true
+            table.insert(availableLevels, levelName)
         end
-        handle:close()
     end
-    
+
     table.sort(availableLevels)
     selectedLevelIndex = 1
 end
@@ -813,26 +767,7 @@ function applyBucket(x, y)
 end
 
 function floodFill(x, y, targetTile, replacementTile)
-    if x < 1 or x > gridWidth or y < 1 or y > gridHeight then return end
-    
-    local currentLayerData = layers[currentLayer]
-    local currentTile = currentLayerData[y] and currentLayerData[y][x] or nil
-    
-    if currentTile == targetTile then
-        if replacementTile then
-            currentLayerData[y] = currentLayerData[y] or {}
-            currentLayerData[y][x] = replacementTile
-        else
-            if currentLayerData[y] then
-                currentLayerData[y][x] = nil
-            end
-        end
-        
-        floodFill(x + 1, y, targetTile, replacementTile)
-        floodFill(x - 1, y, targetTile, replacementTile)
-        floodFill(x, y + 1, targetTile, replacementTile)
-        floodFill(x, y - 1, targetTile, replacementTile)
-    end
+    levelLib.floodFill(layers[currentLayer], gridWidth, gridHeight, x, y, targetTile, replacementTile)
 end
 
 function drawHoveredTile()
@@ -843,7 +778,7 @@ function drawHoveredTile()
     local tileY = math.floor(worldMouseY / tileSize)
     
     if tileX >= 0 and tileX < gridWidth and tileY >= 0 and tileY < gridHeight and
-       mouseX < love.graphics.getWidth() - 100 and mouseY < love.graphics.getHeight() - 100 then
+       not isOverUi(mouseX, mouseY) then
         love.graphics.setColor(1, 1, 0, 0.3)
         love.graphics.rectangle("fill", 
             tileX * tileSize,
@@ -895,33 +830,7 @@ function drawPreview()
 end
 
 function getLinePositions(x1, y1, x2, y2)
-    local positions = {}
-    x1 = math.max(1, math.min(x1, gridWidth))
-    y1 = math.max(1, math.min(y1, gridHeight))
-    x2 = math.max(1, math.min(x2, gridWidth))
-    y2 = math.max(1, math.min(y2, gridHeight))
-
-    local dx = math.abs(x2 - x1)
-    local dy = math.abs(y2 - y1)
-    local sx = x1 < x2 and 1 or -1
-    local sy = y1 < y2 and 1 or -1
-    local err = dx - dy
-
-    while true do
-        table.insert(positions, {x = x1, y = y1})
-        if x1 == x2 and y1 == y2 then break end
-        local e2 = 2 * err
-        if e2 > -dy then
-            err = err - dy
-            x1 = x1 + sx
-        end
-        if e2 < dx then
-            err = err + dx
-            y1 = y1 + sy
-        end
-    end
-    
-    return positions
+    return levelLib.linePositions(x1, y1, x2, y2, gridWidth, gridHeight)
 end
 
 function drawCoordinates()
@@ -932,7 +841,7 @@ function drawCoordinates()
     local tileY = math.floor(worldMouseY / tileSize)
     
     if tileX >= 0 and tileX < gridWidth and tileY >= 0 and tileY < gridHeight and
-       mouseX < love.graphics.getWidth() - 100 and mouseY < love.graphics.getHeight() - 100 then
+       not isOverUi(mouseX, mouseY) then
         love.graphics.setColor(1, 1, 1)
         love.graphics.print("X: " .. (tileX + 1) .. ", Y: " .. (tileY + 1), 10, 70)
     else
@@ -1131,29 +1040,8 @@ function drawCanvasSettings()
 end
 
 function drawLine(x1, y1, x2, y2)
-    x1 = math.max(1, math.min(x1, gridWidth))
-    y1 = math.max(1, math.min(y1, gridHeight))
-    x2 = math.max(1, math.min(x2, gridWidth))
-    y2 = math.max(1, math.min(y2, gridHeight))
-
-    local dx = math.abs(x2 - x1)
-    local dy = math.abs(y2 - y1)
-    local sx = x1 < x2 and 1 or -1
-    local sy = y1 < y2 and 1 or -1
-    local err = dx - dy
-
-    while true do
-        applyBrush(x1, y1)
-        if x1 == x2 and y1 == y2 then break end
-        local e2 = 2 * err
-        if e2 > -dy then
-            err = err - dy
-            x1 = x1 + sx
-        end
-        if e2 < dx then
-            err = err + dx
-            y1 = y1 + sy
-        end
+    for _, pos in ipairs(getLinePositions(x1, y1, x2, y2)) do
+        applyBrush(pos.x, pos.y)
     end
 end
 

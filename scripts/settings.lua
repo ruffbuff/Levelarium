@@ -1,10 +1,11 @@
 local settings = {
     NAME = "Levelarium",
-    VERSION = "1.0.4",
+    VERSION = "1.1.0",
     AUTHOR = "ruffbuff",
     tileSize = 64,
     gridWidth = 50,
     gridHeight = 50,
+    maxGridSize = 1000,  -- максимальный размер сетки (по каждой стороне), вводимый в диалоге C
     assetsPath = "assets/",
     iconFile = "app-image.png",
     currentAssetPack = "itach/v1",
