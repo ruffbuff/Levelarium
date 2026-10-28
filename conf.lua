@@ -1,3 +1,4 @@
+-- Конфигурация LÖVE. Читается только из корня проекта (раньше лежала в scripts/ и игнорировалась).
 function love.conf(t)
     t.identity = "Levelarium"
     t.version = "11.5"
@@ -7,8 +8,8 @@ function love.conf(t)
 
     t.window.title = settings.getWindowTitle()
     t.window.icon = settings.assetsPath .. settings.iconFile
-    t.window.width = settings.gridWidth * settings.tileSize
-    t.window.height = settings.gridHeight * settings.tileSize
+    t.window.width = 1024  -- размер окна редактора (не зависит от размера сетки)
+    t.window.height = 768
     t.window.borderless = false
     t.window.resizable = false
     t.window.minwidth = 800
@@ -39,5 +40,5 @@ function love.conf(t)
     t.modules.touch = false
     t.modules.video = false
     t.modules.window = true
-    t.modules.thread = false
+    t.modules.thread = true  -- фоновая проверка обновлений (scripts/updater.lua)
 end

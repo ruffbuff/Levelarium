@@ -2,6 +2,10 @@
 -- Запуск из корня проекта:  lua tests/run.lua   (или luajit tests/run.lua)
 package.path = "./?.lua;" .. package.path
 local level = require("scripts.level")
+local version = require("scripts.version")
+local files = require("scripts.files")
+local List = require("scripts.list")
+local updater = require("scripts.updater")
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -202,6 +206,157 @@ test("toTxt: уровень 500x500x5 сериализуется быстро", 
     local txt = level.toTxt(layers, 500, 500)
     assert(#txt > 500 * 500 * 5)
     assert(os.clock() - start < 5, "слишком медленно")
+end)
+
+-- ---------------------------------------------------------------- версии
+test("version.compare: порядок по major/minor/patch", function()
+    eq(version.compare("1.2.0", "1.1.9"), 1)
+    eq(version.compare("1.2.0", "1.2.0"), 0)
+    eq(version.compare("1.2.0", "1.10.0"), -1, "1.2 младше 1.10 (числовое сравнение)")
+    eq(version.compare("2.0.0", "1.99.99"), 1)
+end)
+
+test("version.compare: префикс v, короткие версии, пре-релизы", function()
+    eq(version.compare("v1.2.0", "1.2.0"), 0)
+    eq(version.compare("1.2", "1.2.0"), 0)
+    eq(version.compare("1.2.0-rc.1", "1.2.0"), -1, "пре-релиз младше релиза")
+    eq(version.compare("1.2.0-rc.2", "1.2.0-rc.10"), -1)
+    eq(version.compare("1.2.0+build5", "1.2.0"), 0)
+end)
+
+test("version: мусор не версия и никогда не 'новее'", function()
+    eq(version.parse("latest"), nil)
+    eq(version.parse(""), nil)
+    eq(version.parse(nil), nil)
+    eq(version.compare("abc", "1.0.0"), nil)
+    eq(version.isNewer("abc", "1.0.0"), false)
+    eq(version.isNewer("v1.3.0", "1.2.0"), true)
+    eq(version.isNewer("1.2.0", "1.2.0"), false)
+    eq(version.isNewer("1.1.0", "1.2.0"), false)
+end)
+
+-- ---------------------------------------------------------------- updater (без сети)
+local release = '{"url":"https://api.github.com/x","html_url":"https://github.com/ruffbuff/Levelarium/releases/tag/v1.3.0",'
+    .. '"tag_name":"v1.3.0","author":{"html_url":"https://github.com/ruffbuff"}}'
+
+test("updater.parseRelease: tag и страница релиза", function()
+    local tag, url = updater.parseRelease(release)
+    eq(tag, "v1.3.0")
+    eq(url, "https://github.com/ruffbuff/Levelarium/releases/tag/v1.3.0")
+    eq(updater.parseRelease("<html>rate limit</html>"), nil)
+    eq(updater.parseRelease('{"message":"Not Found"}'), nil)
+    eq(updater.parseRelease(nil), nil)
+end)
+
+test("updater.handleResponse: новая версия / та же / мусор", function()
+    updater.available = nil
+    eq(updater.handleResponse(release, "1.3.0"), false)
+    eq(updater.available, nil)
+    eq(updater.handleResponse("oops", "1.2.0"), false)
+    eq(updater.available, nil)
+    eq(updater.handleResponse(release, "1.2.0"), true)
+    eq(updater.available.version, "1.3.0")
+    eq(updater.available.url, "https://github.com/ruffbuff/Levelarium/releases/tag/v1.3.0")
+    updater.available = nil
+end)
+
+test("updater.isSafeUrl: только http(s) без символов shell", function()
+    eq(updater.isSafeUrl("https://api.github.com/repos/ruffbuff/Levelarium/releases/latest"), true)
+    eq(updater.isSafeUrl("http://127.0.0.1:8765/release.json"), true)
+    eq(updater.isSafeUrl("file:///etc/passwd"), false)
+    eq(updater.isSafeUrl('https://x.io/a"; rm -rf ~ #'), false)
+    eq(updater.isSafeUrl("https://x.io/a`id`"), false)
+    eq(updater.isSafeUrl("https://x.io/a b"), false)
+    eq(updater.isSafeUrl(nil), false)
+end)
+
+-- ---------------------------------------------------------------- список файлов
+test("files.splitName / cleanName", function()
+    local name, ext = files.splitName("My Level.TXT")
+    eq(name, "My Level"); eq(ext, "txt")
+    eq(files.splitName("noext"), nil)
+    eq(files.cleanName("  level_1-b  "), "level_1-b")
+    eq(files.cleanName(""), nil)
+    eq(files.cleanName("   "), nil)
+    eq(files.cleanName("../hack"), nil)
+    eq(files.cleanName("a/b"), nil)
+    eq(files.cleanName(("x"):rep(65)), nil)
+end)
+
+test("files.sortEntries: по дате (новые сверху) и по имени", function()
+    local function sample()
+        return {
+            {name = "beta", ext = "txt", modtime = 100},
+            {name = "Alpha", ext = "txt", modtime = 300},
+            {name = "gamma", ext = "txt", modtime = 200},
+            {name = "alpha2", ext = "txt", modtime = 300},
+        }
+    end
+    local byDate = files.sortEntries(sample(), "date")
+    eq(byDate[1].name, "Alpha"); eq(byDate[2].name, "alpha2", "при равной дате - по имени")
+    eq(byDate[3].name, "gamma"); eq(byDate[4].name, "beta")
+    local byName = files.sortEntries(sample(), "name")
+    eq(byName[1].name, "Alpha"); eq(byName[2].name, "alpha2"); eq(byName[3].name, "beta"); eq(byName[4].name, "gamma")
+end)
+
+test("files.formatSize / formatDate / exists", function()
+    eq(files.formatSize(0), "0 B")
+    eq(files.formatSize(1023), "1023 B")
+    eq(files.formatSize(1536), "1.5 KB")
+    eq(files.formatSize(5 * 1024 * 1024), "5.0 MB")
+    eq(files.formatSize(nil), "-")
+    eq(files.formatDate(nil), "-")
+    assert(files.formatDate(0):match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d$"))
+    local list = {{name = "Forest"}, {name = "cave"}}
+    eq((files.exists(list, "forest")), true, "без учёта регистра")
+    eq((files.exists(list, "castle")), false)
+end)
+
+-- ---------------------------------------------------------------- список с прокруткой
+local function numbered(n)
+    local t = {}
+    for i = 1, n do t[i] = {name = "l" .. i} end
+    return t
+end
+
+test("List: выбор, страницы и границы", function()
+    local l = List.new(10)
+    l:setItems(numbered(30))
+    eq(l.selected, 1); eq(l.top, 0)
+    l:move(-1); eq(l.selected, 1, "выше первого не уйти")
+    l:page(1); eq(l.selected, 11); eq(l.top, 1, "окно следует за выбором")
+    l:last(); eq(l.selected, 30); eq(l.top, 20)
+    l:move(5); eq(l.selected, 30)
+    l:home(); eq(l.selected, 1); eq(l.top, 0)
+end)
+
+test("List: колесо двигает окно, но не выбор; пустой список безопасен", function()
+    local l = List.new(10)
+    l:setItems(numbered(30))
+    l:scroll(-2); eq(l.top, 6); eq(l.selected, 1)
+    l:scroll(-100); eq(l.top, 20, "не дальше конца")
+    l:scroll(100); eq(l.top, 0)
+    local e = List.new(10)
+    e:setItems({})
+    e:move(1); e:page(1); e:scroll(-1)
+    eq(e.selected, 0); eq(e.top, 0); eq(e:current(), nil)
+end)
+
+test("List: rowAt и режим allowNone", function()
+    local l = List.new(10)
+    l:setItems(numbered(30)); l:scroll(-1)
+    eq(l.top, 3)
+    eq(l:rowAt(0, 30), 4)
+    eq(l:rowAt(65, 30), 6)
+    eq(l:rowAt(-1, 30), nil)
+    eq(l:rowAt(10 * 30, 30), nil, "за пределами окна")
+    local short = List.new(10); short:setItems(numbered(2))
+    eq(short:rowAt(3 * 30, 30), nil, "ниже последнего элемента")
+    local open = List.new(5); open:setItems(numbered(3)); open:select(0)
+    eq(open.selected, 1, "в обычном списке выбор не бывает пустым")
+    local save = List.new(5, true); save:setItems(numbered(3), 0)
+    eq(save.selected, 0); eq(save:current(), nil)
+    save:move(1); eq(save.selected, 1)
 end)
 
 print(("\n%d passed, %d failed"):format(passed, failed))
